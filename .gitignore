@@ -1,0 +1,25 @@
+# Скачанные IPA: внутри Apple ID и имя владельца (iTunesMetadata.plist) и DRM, привязанный к аккаунту
+*.ipa
+ipa/
+
+# Сборка: exe больше 100 МБ (лимит GitHub) — выкладывать через Releases
+*.exe
+dist/
+build/
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Локальные настройки Claude Code (пути с именем пользователя)
+.claude/settings.local.json
+
+# Служебные файлы программы, если вдруг окажутся рядом
+keychain.pass
+email.txt
+history.json
+versions_cache.json
+/installed.txt

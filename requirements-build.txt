@@ -1,0 +1,7 @@
+# Окружение сборки (Python 3.12): build.ps1 ставит это в build\venv
+PySide6==6.12.0
+pymobiledevice3==11.41.2
+pyinstaller==6.22.3
+py7zr==1.0.0
+pillow==13.0.0
+segno==1.6.6
