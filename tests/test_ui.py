@@ -81,6 +81,30 @@ class Window(unittest.TestCase):
                 storage.EMAIL = old
                 b.wipe_session = wipe
 
+    def test_login_asks_2fa_even_when_ipatool_exits_0(self):
+        """ipatool 2.7: «2FA code is required…» с кодом возврата 0 — это не вход, нужно спросить код (ошибка 1.0.0)."""
+        from restore_gui import tasks
+        b = self.backend
+        need = (0, "INF preparing authentification\nINF 2FA code is required; run the command again and supply "
+                   "a code using the '--auth-code' flag\n")
+        saved = (b.stream, b.ask_main, b.session_ok, b.post, tasks.sap_ready, b.loggedIn, b.account)
+        b.post, tasks.sap_ready = (lambda fn: fn()), (lambda: True)
+        try:
+            for answers, code, session, expected in (
+                    ([need, (0, "INF success=true\n")], "123456", True, True),   # код введён — вход
+                    ([need], None, True, False),                                  # код не введён — не вход
+                    ([need, need], "000000", True, False),                        # код не подошёл
+                    ([(0, "INF success=true\n")], None, False, False)):           # «успех» без сессии
+                calls = iter(answers)
+                b.stream = lambda cmd, quiet_json=False: next(calls)
+                b.ask_main = lambda title, prompt: code
+                b.session_ok = lambda ipatool: session
+                b.loggedIn, b.account = False, ""
+                b.task_login("ipatool", "someone@example.com", "pw")
+                self.assertEqual(b.loggedIn, expected, f"{answers[0][1][-40:]!r}, код {code}, сессия {session}")
+        finally:
+            b.stream, b.ask_main, b.session_ok, b.post, tasks.sap_ready, b.loggedIn, b.account = saved
+
     def test_download_creates_missing_parent_folders(self):
         """У установленной версии папка — Документы\\Restore\\ipa; если нет даже Restore, скачивание не падает."""
         import tempfile

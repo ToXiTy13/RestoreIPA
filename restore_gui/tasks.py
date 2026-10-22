@@ -176,18 +176,30 @@ class TasksMixin:
             if code:
                 cmd += ["--auth-code", code]
             rc, out = self.stream(cmd)
-            if rc == 0:
+            # ipatool может ответить «2FA code is required…» и при этом завершиться с кодом 0: вход НЕ выполнен,
+            # нужен код. Поэтому сначала смотрим на просьбу о коде, а успех подтверждаем через `auth info`.
+            needs_code = re.search(r"2fa|auth.?code|verification|two.?factor", out, re.I)
+            if rc == 0 and not needs_code and self.session_ok(ipatool):
                 self.log("Вход выполнен.")
                 self.post(lambda: self.on_login_result(True, email))  # ни email, ни пароль на диск не пишутся
                 return
-            if not code and re.search(r"2fa|auth.?code|verification|two.?factor", out, re.I):
+            if needs_code and not code:
                 code = self.ask_main("Двухфакторная аутентификация", "Введите код с вашего устройства Apple:")
                 if code:
                     continue
+            elif needs_code:
+                self.log("Код подтверждения не подошёл или устарел — войдите заново и введите новый код.")
+            elif rc == 0:
+                self.log("ipatool сообщил об успешном входе, но сессии Apple ID нет.")
             self.log("Вход не удался.")
             self.hint(out)
             self.post(lambda: self.on_login_result(False, ""))
             return
+
+    def session_ok(self, ipatool):
+        """Есть ли рабочая сессия Apple ID: `ipatool auth info` без ошибки."""
+        rc, out = run_quiet([ipatool, *core.keychain_args(), "auth", "info"], timeout=60)
+        return rc == 0 and not re.search(r"failed|not logged|\bERR\b", out, re.I)
 
     def _prepare_engine(self):
         if seed_unicorn():
