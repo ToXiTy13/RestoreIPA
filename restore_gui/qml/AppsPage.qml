@@ -1,4 +1,4 @@
-// «Все приложения»: поиск, категории и весь каталог.
+// «Каталог»: поиск, категории и все приложения.
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -7,7 +7,7 @@ ColumnLayout {
     spacing: 10
 
     PageTitle {
-        title: "Все приложения"
+        title: "Каталог"
         sub: "Поиск по названию, App ID или ссылке App Store. Отметьте несколько — поставим по очереди."
     }
 
@@ -25,7 +25,7 @@ ColumnLayout {
         onTextChanged: debounce.restart()
         Timer { id: debounce; interval: 180; onTriggered: { backend.setQuery(search.text); list.positionViewAtBeginning() } }
         background: Rectangle {
-            radius: 14; color: P.card
+            radius: height / 2; color: P.card
             border.color: search.activeFocus ? P.accent : P.border
             border.width: search.activeFocus ? 2 : 1
             Behavior on border.color { ColorAnimation { duration: 150 } }
@@ -40,31 +40,38 @@ ColumnLayout {
         }
     }
 
-    ListView {
+    // категории — текстовыми вкладками с подчёркиванием
+    Item {
         Layout.fillWidth: true
-        implicitHeight: 34
-        orientation: ListView.Horizontal
-        spacing: 6
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        model: backend.categories
-        delegate: Rectangle {
-            id: chip
-            required property string modelData
-            readonly property bool on: modelData === backend.category
-            height: 32; radius: 16
-            width: chipText.implicitWidth + 28
-            color: on ? P.accent : (chipHover.hovered ? P.cardHover : P.card)
-            border.color: on ? P.accent : P.border
-            Behavior on color { ColorAnimation { duration: 150 } }
-            Text { id: chipText; anchors.centerIn: parent; text: chip.modelData; font.family: P.font
-                   font.pixelSize: 12; color: chip.on ? "white" : P.muted }
-            HoverHandler { id: chipHover; cursorShape: Qt.PointingHandCursor }
-            TapHandler { onTapped: { backend.setCategory(chip.modelData); list.positionViewAtBeginning() } }
+        implicitHeight: 36
+        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: P.border }
+        ListView {
+            anchors.fill: parent
+            orientation: ListView.Horizontal
+            spacing: 22
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            model: backend.categories
+            delegate: Item {
+                id: cat
+                required property string modelData
+                readonly property bool on: modelData === backend.category
+                height: 36
+                width: catText.implicitWidth
+                Text { id: catText; anchors.verticalCenter: parent.verticalCenter; anchors.verticalCenterOffset: -2
+                       text: cat.modelData; font.family: P.font; font.pixelSize: 13
+                       font.weight: cat.on ? Font.Bold : Font.Medium
+                       color: cat.on ? P.text : (catHover.hovered ? P.text : P.muted) }
+                Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 3; radius: 1.5
+                            color: P.accent; visible: cat.on }
+                HoverHandler { id: catHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: { backend.setCategory(cat.modelData); list.positionViewAtBeginning() } }
+            }
         }
     }
 
-    Text { text: "Найдено: " + list.count; color: P.muted; font.family: P.font; font.pixelSize: 12 }
+    Text { text: "Найдено: " + list.count; color: P.muted; font.family: P.font; font.pixelSize: 12
+           Layout.topMargin: 4 }
 
     AppsList {
         id: list

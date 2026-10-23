@@ -5,6 +5,7 @@ import QtQuick.Controls
 ScrollBar {
     id: sb
     policy: ScrollBar.AsNeeded
+    visible: size < 1  // AsNeeded в Basic оставляет полосу на всю высоту, даже когда прокручивать нечего
     implicitWidth: 10
     contentItem: Rectangle {
         implicitWidth: 6

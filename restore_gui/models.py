@@ -35,6 +35,42 @@ class RowsModel(QAbstractListModel):
         self.endResetModel()
         self.countChanged.emit()
 
+    def update_items(self, items):
+        """Как set_items, но без сброса списка, когда строки только добавились, убрались или изменились:
+        сброс модели прокручивает ListView к началу (так каждая находка поиска сбивала прокрутку «Мои»),
+        а вставка и удаление строк — нет. Если порядок оставшихся строк другой, список пересобирается."""
+        items = list(items)
+        if not self.key:
+            self.set_items(items)
+            return
+        old = [self.key(a) for a in self.items]
+        new = [self.key(a) for a in items]
+        old_set, new_set = set(old), set(new)
+        if len(old_set) != len(old) or len(new_set) != len(new) \
+                or [k for k in old if k in new_set] != [k for k in new if k in old_set]:
+            self.set_items(items)
+            return
+        for n in range(len(old) - 1, -1, -1):  # с конца: номера ещё не удалённых строк не съезжают
+            if old[n] not in new_set:
+                self.beginRemoveRows(QModelIndex(), n, n)
+                del self.items[n], self.rows[n]
+                self.endRemoveRows()
+        for n, (k, item) in enumerate(zip(new, items)):  # остались общие строки в нужном порядке
+            row = self.make_row(item)
+            if n < len(self.items) and self.key(self.items[n]) == k:
+                self.items[n] = item
+                if row != self.rows[n]:
+                    self.rows[n] = row
+                    self.dataChanged.emit(self.index(n), self.index(n))
+            else:
+                self.beginInsertRows(QModelIndex(), n, n)
+                self.items.insert(n, item)
+                self.rows.insert(n, row)
+                self.endInsertRows()
+        self.index_of = {k: n for n, k in enumerate(new)}
+        if len(old) != len(new):
+            self.countChanged.emit()
+
     def refresh_all(self):
         """Пересчитать строки, не сбрасывая список (прокрутка и выделение сохраняются)."""
         if not self.rows:

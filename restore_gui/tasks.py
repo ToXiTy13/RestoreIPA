@@ -1,13 +1,13 @@
 """Долгие операции: выполняются в рабочем потоке (start). С окном общаются только через self.log, self.post(fn)
 (выполнить fn в главном потоке) и self.set_status; вопросы человеку — ask_yes_no / ask_file / show_notice
 (их даёт Backend)."""
+import contextlib
 import ipaddress
 import re
 import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -17,9 +17,10 @@ from pathlib import Path
 import restore_apps as core
 
 from . import storage
-from .apple import (ANSI, APPLE_HOSTS, NO_WINDOW, SESSION_LOST, bundled, clip, explain_error, fetch_available,
-                    in_session_copies, list_versions_cmd, ownership, parse_purchases, parse_versions, run_quiet,
-                    sap_ready, seed_unicorn)
+from .apple import (ANSI, APPLE_HOSTS, SESSION_LOST, ProcsClosed, adopt_old_cache, bundled, clear_stale_locks, clip,
+                    explain_error, fatal_error, fetch_available, forget, in_session_copies, kill_procs,
+                    list_versions_cmd, ownership, parse_purchases, parse_versions, popen, run_quiet, sap_ready,
+                    scan_copies, seed_unicorn)
 from .device import installer_cmd, ipa_info, ipa_ok, probe_device, vtuple
 
 SCAN_WORKERS = 4  # параллельных проверок владения
@@ -39,6 +40,9 @@ class TasksMixin:
         email = email.strip()
         if not email or not password:
             self.show_notice("Вход", "Введите Apple ID и пароль.")
+            return
+        if self.busy:  # кнопка в это время заблокирована, а Enter в поле пароля — нет
+            self.show_notice("Подождите", "Сейчас выполняется другая операция — войдите после её окончания.")
             return
         ipatool = self.need_ipatool()
         if ipatool:
@@ -60,6 +64,7 @@ class TasksMixin:
 
     def on_stop(self):
         self.stop_flag = True
+        kill_procs("task")  # скачивание, вход, установка: иначе ждали бы, пока ipatool закончит сам
 
     def on_install_file(self):
         ipa = self.ask_file("Выберите IPA", core.OUT_DIR if core.OUT_DIR.exists() else core.HERE,
@@ -86,6 +91,7 @@ class TasksMixin:
             return
 
         self.set_busy(True)  # сразу: вторая кнопка до старта потока уже не сработает
+        self.stop_flag = False  # «Остановить» прошлой операции не должен прерывать новую
         self.set_status(label + "…")
 
         def runner():
@@ -107,7 +113,8 @@ class TasksMixin:
         if not ask:
             return None
         if self.ask_yes_no(f"Не найден {name}", f"{hint}\n\nУказать путь к {name} вручную?"):
-            path = self.ask_file(f"Укажите {name}", core.HERE, "Программы (*.exe);;Все файлы (*.*)")
+            path = self.ask_file(f"Укажите {name}", core.HERE, "Программы (*.exe);;Все файлы (*.*)"
+                                 if sys.platform.startswith("win") else "Все файлы (*)")
             if path:
                 self.tool_paths[name] = path
                 return path
@@ -136,26 +143,60 @@ class TasksMixin:
         return text + f"pymobiledevice3 {mark('pymobiledevice3')}   ideviceinstaller {mark('ideviceinstaller')}"
 
     def stream(self, cmd, quiet_json=False):
-        self.log("$ " + core.masked(cmd))
-        p = subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
-            env=core.ipatool_env() if core.is_ipatool(cmd) else None,
-        )
-        lines = []
-        for line in p.stdout:
-            line = ANSI.sub("", line)
-            lines.append(line)
-            if quiet_json and line.lstrip().startswith("{") and '"apps"' in line:
-                continue  # длинный JSON со списком не засоряет журнал; ошибки при этом остаются видны
-            self.log(line)
-        p.wait()
+        """Запуск с построчным журналом. ipatool работает с основной сессией — под self.dlock, как и dq:
+        иначе панель приложения запустила бы второй ipatool на той же папке во время скачивания."""
+        ipatool = core.is_ipatool(cmd)
+        with self.session_lock(stoppable=True) if ipatool else contextlib.nullcontext(True) as go:
+            # «Остановить» нажали между командами или пока ждали очереди к сессии — команду не начинаем
+            if not go or self.stop_flag:
+                self.log("Остановлено.")
+                return 1, "Остановлено."
+            self.log("$ " + core.masked(cmd))
+            if ipatool:
+                clear_stale_locks()
+            try:
+                p = popen(cmd, tag="task", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                          env=core.ipatool_env() if ipatool else None)
+            except ProcsClosed:
+                return 1, "Программа закрывается."
+            lines = []
+            try:
+                for line in p.stdout:
+                    line = ANSI.sub("", line)
+                    lines.append(line)
+                    if quiet_json and line.lstrip().startswith("{") and '"apps"' in line:
+                        continue  # длинный JSON со списком не засоряет журнал; ошибки при этом остаются видны
+                    self.log(line)
+                p.wait()
+            finally:
+                forget(p)
+                p.stdout.close()
+        if self.stop_flag:
+            self.log("Остановлено.")
         return p.returncode, "".join(lines)
 
-    def dq(self, cmd, timeout=90):
-        """run_quiet через основную сессию ipatool — по одной команде за раз (общая папка сессии)."""
-        with self.dlock:
-            return run_quiet(cmd, timeout=timeout)
+    def dq(self, cmd, timeout=90, tag=""):
+        """run_quiet через основную сессию ipatool — по одной команде за раз (общая папка сессии).
+        tag="task" — команда основной операции: её прерывает «Остановить», в том числе пока она ждёт очереди."""
+        with self.session_lock(stoppable=tag == "task") as go:
+            if not go:
+                return 1, "Остановлено."
+            clear_stale_locks()
+            return run_quiet(cmd, timeout=timeout, tag=tag)
+
+    @contextlib.contextmanager
+    def session_lock(self, stoppable):
+        """self.dlock — основная сессия ipatool. Даёт True, если можно работать; False — пока ждали очереди
+        (панель приложения держит сессию до 3 минут), нажали «Остановить» (только при stoppable)."""
+        while not self.dlock.acquire(timeout=0.2):
+            if stoppable and self.stop_flag:
+                yield False
+                return
+        try:
+            yield not (stoppable and self.stop_flag)
+        finally:
+            self.dlock.release()
 
     def hint(self, text):
         hints = explain_error(text)
@@ -176,40 +217,74 @@ class TasksMixin:
             if code:
                 cmd += ["--auth-code", code]
             rc, out = self.stream(cmd)
-            if rc == 0:
+            if self.stop_flag:
+                self.post(lambda: self.on_login_result(False, ""))
+                return
+            # ipatool может ответить «2FA code is required…» и при этом завершиться с кодом 0: вход НЕ выполнен,
+            # нужен код. Поэтому сначала смотрим на просьбу о коде, а успех подтверждаем через `auth info`.
+            needs_code = core.NEEDS_CODE.search(out)
+            if rc == 0 and not needs_code and self.session_ok(ipatool):
                 self.log("Вход выполнен.")
                 self.post(lambda: self.on_login_result(True, email))  # ни email, ни пароль на диск не пишутся
                 return
-            if not code and re.search(r"2fa|auth.?code|verification|two.?factor", out, re.I):
+            if needs_code and not code:
                 code = self.ask_main("Двухфакторная аутентификация", "Введите код с вашего устройства Apple:")
                 if code:
                     continue
+            elif needs_code:
+                self.log("Код подтверждения не подошёл или устарел — войдите заново и введите новый код.")
+            elif rc == 0:
+                self.log("ipatool сообщил об успешном входе, но сессии Apple ID нет.")
             self.log("Вход не удался.")
             self.hint(out)
             self.post(lambda: self.on_login_result(False, ""))
             return
 
+    def session_ok(self, ipatool):
+        """Есть ли рабочая сессия Apple ID: `ipatool auth info` без ошибки."""
+        rc, out = self.dq([ipatool, *core.keychain_args(), "auth", "info"], timeout=60)
+        return rc == 0 and not re.search(r"failed|not logged|\bERR\b", out, re.I)
+
     def _prepare_engine(self):
+        if adopt_old_cache():
+            self.log("Служебные файлы ipatool перенесены из %LOCALAPPDATA%\\ipatool в папку программы.")
         if seed_unicorn():
             self.log("Эмулятор для входа (Unicorn 2.1.4) подготовлен из встроенной копии — GitHub не нужен.")
 
     # ---------- сессия ----------
     def wipe_session(self, revoke=True):
-        """Завершить сессию Apple ID: `ipatool auth revoke` и удалить папку сессии ~/.ipatool.
+        """Завершить сессию Apple ID: `ipatool auth revoke`, удалить папку сессии ~/.ipatool и keychain.pass —
+        пароль к ней, если сессию оставила консольная версия (папка сессии у них общая).
 
         Возвращает True, если сессия была. Пароль и email Apple ID программа на диске не хранит.
+        Под self.dlock, чтобы ни одна команда не шла по стираемой сессии; если за 10 с её не отпустили
+        (зависший ipatool), стираем всё равно — сессия на диске хуже.
         """
-        folder = core.IPATOOL_HOME / ".ipatool"
-        existed = folder.exists() and any(folder.iterdir())
-        ipatool = self.find_tool("ipatool", "", ask=False)
-        if revoke and existed and ipatool:
-            run_quiet([ipatool, *core.keychain_args(), "auth", "revoke"], timeout=15)
-        shutil.rmtree(folder, ignore_errors=True)
-        # копии сессии для параллельных запросов (apple.in_session_copies), в т.ч. оставшиеся после сбоя
-        for d in Path(tempfile.gettempdir()).glob("restore_scan_*"):
-            existed = existed or (d / "w0" / ".ipatool").exists()
-            shutil.rmtree(d, ignore_errors=True)
-        return existed
+        got = self.dlock.acquire(timeout=10)
+        try:
+            folder = core.IPATOOL_HOME / ".ipatool"
+            existed = folder.exists() and any(folder.iterdir())
+            ipatool = self.find_tool("ipatool", "", ask=False)
+            if revoke and existed and ipatool:
+                clear_stale_locks()  # от только что завершённых процессов: иначе revoke может не пройти
+                run_quiet([ipatool, *core.keychain_args(), "auth", "revoke"], timeout=15, tag="wipe")
+            shutil.rmtree(folder, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                core.KEYCHAIN_PASS.unlink()
+            # копии сессии для параллельных запросов (apple.in_session_copies), в т.ч. оставшиеся после сбоя
+            for d in scan_copies():
+                existed = existed or (d / "w0" / ".ipatool").exists()
+                shutil.rmtree(d, ignore_errors=True)
+            return existed
+        finally:
+            if got:
+                self.dlock.release()
+
+    def task_logout(self):
+        """Выход: сессию стираем в фоне — `ipatool auth revoke` идёт секунды, окно не должно замирать."""
+        kill_procs("")  # проверки панели приложения: их копии сессии стираются вместе с ней
+        self.wipe_session()
+        self.log("Вы вышли из Apple ID, сессия и email удалены с компьютера.")
 
     def task_purchases(self, ipatool, country="ru"):
         acc, total, first_json, failed = {}, None, "", False
@@ -219,7 +294,8 @@ class TasksMixin:
                    "--max-results", "100", "--page", str(page)]
             rc, out = self.stream(cmd, quiet_json=True)
             if rc != 0:
-                self.log("Не удалось получить список покупок. Выполнен ли вход? (кнопка «Войти»)")
+                if not self.stop_flag:  # остановили — покажем то, что уже успели получить
+                    self.log("Не удалось получить список покупок. Выполнен ли вход? (кнопка «Войти»)")
                 failed = True
                 break
             got, tot = parse_purchases(out)
@@ -261,7 +337,6 @@ class TasksMixin:
         Проба владения — `ipatool list-versions -i ID`: ничего не скачивает, а Apple отвечает
         «license is required», если приложения нет в истории аккаунта.
         """
-        self.stop_flag = False
         names = {a["id"]: a["name"] for a in self.catalog.apps}
         ids = list(names)
         if not ids:
@@ -283,7 +358,7 @@ class TasksMixin:
         def probe(app_id, env):
             if self.stop_flag or state["abort"]:
                 return
-            rc, out = run_quiet(list_versions_cmd(ipatool, kc, app_id), env=env)
+            rc, out = run_quiet(list_versions_cmd(ipatool, kc, app_id), env=env, tag="task")
             owns = ownership(rc, out)
             with lock:
                 state["done"] += 1
@@ -293,8 +368,8 @@ class TasksMixin:
                     if owns:
                         owned[app_id] = names[app_id]
                         self.log(f"  ✓ {names[app_id]} ({app_id}) — есть в вашей истории")
-                        found = dict(owned)
-                        self.post(lambda: self.on_purchases_result(found, set()))
+                        found = {app_id: names[app_id]}
+                        self.post(lambda: self.add_found(found))
                 elif SESSION_LOST.search(out):
                     self.log("Вход не выполнен или сессия истекла. Нажмите «Войти» и повторите.")
                     state["abort"] = True
@@ -309,7 +384,7 @@ class TasksMixin:
                 if state["done"] % 50 == 0:
                     self.log(f"Проверено {state['done']} из {len(todo)}, найдено {len(owned)}")
 
-        in_session_copies(todo, probe, SCAN_WORKERS)
+        in_session_copies(todo, probe, SCAN_WORKERS, lock=self.dlock)
         self.post(self.refresh_list_keep)
         if self.stop_flag:
             self.log("Остановлено.")
@@ -325,7 +400,7 @@ class TasksMixin:
                      "эти приложения.")
 
     def task_download(self, ipatool, app_id, name, purchase, version=None, fallback=False):
-        core.OUT_DIR.mkdir(parents=True, exist_ok=True)  # у установленной версии это Документы\Restore\ipa
+        core.OUT_DIR.mkdir(parents=True, exist_ok=True)  # «ipa» рядом с exe или Документы\Restore\ipa
         suffix = f"_v{version}" if version else ""
         dest = core.OUT_DIR / f"{core.slug(name)}_{app_id}{suffix}.ipa"
         if version:
@@ -343,6 +418,8 @@ class TasksMixin:
             rc, out = self.stream(cmd)
             if rc == 0 and dest.exists():
                 break
+            if self.stop_flag:
+                return None  # не берём и старый файл из архива: «Скачать и установить» не должно ничего ставить
             if not re.search(r"timeout|reset|EOF|connection|unexpected", out, re.I) or attempt == 3:
                 break
             self.log(f"Сеть подвисла — повтор {attempt + 1} из 3, докачиваем с места обрыва…")
@@ -366,7 +443,7 @@ class TasksMixin:
         self.log("Подключите iPhone по USB, разблокируйте и нажмите «Доверять».")
         self.note_if_installed(installer, ipa)
         rc, out = self.stream(installer_cmd(installer, "install", ipa))
-        self.log("Установлено." if rc == 0 else "Установка не удалась (код %s)." % rc)
+        self.log("Установлено." if rc == 0 else f"Установка не удалась (код {rc}).")
         if rc != 0:
             self.hint(out)
         return rc == 0
@@ -376,7 +453,7 @@ class TasksMixin:
         bid = ipa_info(ipa).get("CFBundleIdentifier")
         if not bid:
             return
-        rc, out = run_quiet(installer_cmd(installer, "list"), timeout=60)
+        rc, out = run_quiet(installer_cmd(installer, "list"), timeout=60, tag="task")
         if rc == 0 and bid in out:
             self.log(f"Приложение {bid} уже установлено на iPhone — ставлю поверх, данные сохранятся.")
 
@@ -388,7 +465,7 @@ class TasksMixin:
         cmd = installer_cmd(installer, "info") if installer else None
         if not cmd:
             return None
-        rc, out = run_quiet(cmd, timeout=45)
+        rc, out = run_quiet(cmd, timeout=45, tag="task")
         if rc != 0:
             return None
         m = re.search(r'"?ProductVersion"?\s*[:=]\s*"?(\d+(?:\.\d+){0,2})', out) or \
@@ -418,30 +495,43 @@ class TasksMixin:
                 return False
         elif ios and need:
             self.log(f"Версия {shown or '?'} подходит: нужна iOS {need}, на iPhone {ios}.")
-        return self.task_install(installer, dest)
+        ok = self.task_install(installer, dest)
+        if ok:
+            self.drop_installed(dest)
+        return ok
 
     def pick_compatible(self, ipatool, app_id, name, versions, ios, budget=7):
         """Двоичный поиск новейшей подходящей версии: старые версии требуют более старую iOS.
 
         versions — ID по убыванию (новые первыми); versions[0] уже известна как неподходящая.
-        Каждая проба — скачивание IPA (попадает в архив и повторно не качается).
+        Каждая проба — скачивание IPA. Подошедшая версия остаётся в архиве, а скачанные только для пробы
+        удаляются в конце: иначе подбор молча оставлял до 7 полных IPA (это легко несколько ГБ).
         """
         lo, hi, best = 1, len(versions) - 1, None
         tries = 0
-        while lo <= hi and tries < budget and not self.stop_flag:
-            mid = (lo + hi) // 2
-            tries += 1
-            self.log(f"Подбор версии для iOS {ios}: проверяю вариант {mid + 1} из {len(versions)}…")
-            path = self.task_download(ipatool, app_id, name, False, versions[mid])
-            if not path:
-                return None
-            plist = ipa_info(path)
-            need, shown = plist.get("MinimumOSVersion"), plist.get("CFBundleShortVersionString")
-            if need and vtuple(need) > vtuple(ios):
-                lo = mid + 1
-            else:
-                best = (path, shown, need)
-                hi = mid - 1
+        before = set(storage.archived(app_id))
+        probes = []  # (путь, ID версии)
+        try:
+            while lo <= hi and tries < budget and not self.stop_flag:
+                mid = (lo + hi) // 2
+                tries += 1
+                self.log(f"Подбор версии для iOS {ios}: проверяю вариант {mid + 1} из {len(versions)}…")
+                path = self.task_download(ipatool, app_id, name, False, versions[mid])
+                if not path:
+                    if best and not self.stop_flag:  # подходящая уже скачана — не выбрасываем её из-за сбоя сети
+                        self.log("Следующую пробу скачать не удалось — беру лучшую из уже проверенных версий.")
+                        break
+                    return None
+                probes.append((path, versions[mid]))
+                plist = ipa_info(path)
+                need, shown = plist.get("MinimumOSVersion"), plist.get("CFBundleShortVersionString")
+                if need and vtuple(need) > vtuple(ios):
+                    lo = mid + 1
+                else:
+                    best = (path, shown, need)
+                    hi = mid - 1
+        finally:
+            self.drop_probes(app_id, [(p, v) for p, v in probes if p not in before and (not best or p != best[0])])
         if not best:
             self.log("Не нашлось версии этого приложения для вашей iOS: даже старые требуют iOS новее, "
                      "или Apple отдал не все версии.")
@@ -449,16 +539,29 @@ class TasksMixin:
         self.log(f"Подходит версия {best[1] or '?'} (нужна iOS {best[2] or '?'}).")
         return best[0]
 
+    def drop_probes(self, app_id, probes):
+        """Удалить IPA, скачанные только для подбора версии [(путь, ID версии)], и их записи в истории:
+        иначе панель показывала бы их как «скачано через программу», хотя файла уже нет."""
+        freed = 0
+        for p, version in probes:
+            storage.forget_download(app_id, version)
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                freed += size
+            except OSError:
+                pass
+        if freed:
+            self.log(f"Удалены пробные версии, скачанные для подбора: {freed // 1048576} МБ.")
+
     def task_batch(self, ipatool, installer, apps):
-        self.stop_flag = False
         done, skipped, failed = [], [], []
         kc = core.keychain_args()
         for n, app in enumerate(apps, 1):
             if self.stop_flag:
-                self.log("Остановлено.")
-                break
+                break  # итог ниже покажет, что успели
             self.log(f"── {n}/{len(apps)}: {app['name']} ({app['id']})")
-            rc, out = self.dq(list_versions_cmd(ipatool, kc, app["id"]))
+            rc, out = self.dq(list_versions_cmd(ipatool, kc, app["id"]), tag="task")
             owned = ownership(rc, out)
             if not owned:
                 if owned is False:
@@ -469,7 +572,7 @@ class TasksMixin:
                     self.log("Не удалось проверить приложение.")
                     self.hint(out)
                     failed.append(app["name"])
-                    if explain_error(out) and re.search(r"Сессия|Нет связи|блокир", explain_error(out)[0]):
+                    if fatal_error(out):
                         break  # дальше будет то же самое
                 continue
             self.owned_state[app["id"]] = True
@@ -513,8 +616,8 @@ class TasksMixin:
                 continue
             try:
                 req = urllib.request.Request(f"https://{host}/", method="HEAD")
-                urllib.request.urlopen(req, timeout=10)
-                ok = True
+                with urllib.request.urlopen(req, timeout=10):  # закрыть соединение сразу после ответа
+                    ok = True
             except urllib.error.HTTPError:
                 ok = True  # сервер ответил (404/403 — нормально для корня)
             except (urllib.error.URLError, OSError) as e:

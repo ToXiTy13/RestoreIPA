@@ -112,7 +112,7 @@ class DetailMixin:
                 self.owned_state[a["id"]] = owned
             self.ui(d, lambda: self.paint_clones(d))
 
-        in_session_copies(todo, one, workers)
+        in_session_copies(todo, one, workers, lock=self.dlock)
         d["clone_wait"] = False
         self.ui(d, lambda: self.paint_clones(d))
         self.post(self.refresh_list_keep)
@@ -138,7 +138,10 @@ class DetailMixin:
             self.ui(d, lambda: self.fill_versions(d, [], {}))
             return
         kc = core.keychain_args()
-        self.set_lbl(d, "acc", "спрашиваю Apple… обычно 5–30 секунд", "muted")
+        if self.dlock.locked():  # ipatool занят скачиванием или входом — сессия у него
+            self.set_lbl(d, "acc", "жду окончания текущей операции…", "muted")
+        else:
+            self.set_lbl(d, "acc", "спрашиваю Apple… обычно 5–30 секунд", "muted")
         t0 = time.time()
         rc, out = self.dq(list_versions_cmd(ipatool, kc, app["id"]), timeout=180)
         took = time.time() - t0
@@ -159,7 +162,7 @@ class DetailMixin:
             self.set_lbl(d, "acc", "Не было у этого Apple ID — Apple не отдаст его, версий нет", "warn")
             self.log(f"{app['name']}: нет в истории Apple ID (ответ за {took:.0f} с)")
         elif rc == 124:
-            d["check"], d["err"] = "error", "Apple не ответил за 3 минуты — проверьте связь (кнопка «Связь» слева)."
+            d["check"], d["err"] = "error", "Apple не ответил за 3 минуты — проверьте связь («Проверить связь с Apple» в меню «⋯» вверху справа)."
             self.set_lbl(d, "acc", "Ошибка проверки: Apple не ответил за 3 минуты", "warn")
             self.log(f"{app['name']}: Apple не ответил за 3 минуты.")
         elif SESSION_LOST.search(out):
@@ -236,7 +239,7 @@ class DetailMixin:
             self.ui(d, lambda: self.fill_versions(d, versions, snap))
 
         try:
-            in_session_copies(todo, one, workers)
+            in_session_copies(todo, one, workers, lock=self.dlock)
         finally:
             pending.difference_update(todo)
         snap = dict(meta)
@@ -245,7 +248,7 @@ class DetailMixin:
             self.log(f"{name}: номера не получены для {len(fails)} из {len(todo)} версий. Такую версию всё равно "
                      "можно выбрать и скачать.")
             self.hint("\n".join(o for _, o in fails))
-        storage.save_meta(app_id, meta)
+        storage.save_meta(app_id, snap)  # не meta: его может дополнять параллельный fetch_meta («Показать ещё»)
 
     def store_check(self, d):
         app = d["app"]

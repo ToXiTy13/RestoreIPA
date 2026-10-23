@@ -20,19 +20,29 @@ Apple отдаст ошибку лицензии — обойти это скр�
   python restore_apps.py login
   python restore_apps.py download 1660762523
   python restore_apps.py restore "ДомКлик (ДКлик)"
+  python restore_apps.py logout
 """
 import argparse
+import contextlib
 import csv
 import getpass
 import json
+import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+if sys.platform.startswith("win"):
+    # иначе Windows (и shutil.which) ищет ipatool.exe сначала в текущей папке, и подложенный там файл
+    # получил бы пароль Apple ID; влияет и на поиск программ дочерними процессами
+    os.environ.setdefault("NoDefaultCurrentDirectoryInExePath", "1")
 
 FROZEN = getattr(sys, "frozen", False)  # собран PyInstaller'ом
 BUNDLE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))  # встроенные ресурсы
@@ -40,14 +50,13 @@ HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resol
 _CSV = "removed_ru_appstore_app_ids.csv"
 # CSV рядом с программой имеет приоритет над встроенным: его можно править
 CATALOG = HERE / _CSV if (HERE / _CSV).exists() else BUNDLE / _CSV
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 APP_NAME = "Restore"
 
 
 def _data_dir():
     """Служебные файлы программы: отдельная папка, ничего не смешивается с другими программами."""
     if sys.platform.startswith("win"):
-        import os
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support"
@@ -57,12 +66,10 @@ def _data_dir():
 
 
 def _writable(folder):
+    """Можно ли писать в папку. Проба — временный файл, который удаляется при закрытии; папки не создаются."""
     try:
-        folder.mkdir(parents=True, exist_ok=True)
-        probe = folder / ".write_test"
-        probe.write_text("", encoding="utf-8")
-        probe.unlink()
-        return True
+        with tempfile.TemporaryFile(dir=folder):
+            return True
     except OSError:
         return False
 
@@ -70,11 +77,19 @@ def _writable(folder):
 DATA_DIR = _data_dir()
 # ipatool получает свою «домашнюю папку»: его сессия не трогает ~/.ipatool пользователя
 IPATOOL_HOME = DATA_DIR / "ipatool-home"
-# .ipa: у портативной версии — в папке «ipa» рядом с exe, у установленной — в «Документы\\Restore\\ipa»
-INSTALLED = (HERE / "installed.txt").exists()  # файл кладёт установщик
-OUT_DIR = HERE / "ipa" if (not INSTALLED and _writable(HERE / "ipa")) else Path.home() / "Documents" / APP_NAME / "ipa"
+# кэш ipatool (Unicorn, служебные файлы Apple для входа). Go кладёт его в os.UserCacheDir()/ipatool, а
+# ipatool_env() подставляет вместо него DATA_DIR: выходит DATA_DIR\ipatool, а не %LOCALAPPDATA%\ipatool
+IPATOOL_CACHE = (IPATOOL_HOME / "Library" / "Caches" if sys.platform == "darwin" else DATA_DIR) / "ipatool"
+# .ipa: у портативной версии — в папке «ipa» рядом с exe (появляется при первом скачивании), у установленной,
+# на Mac и если рядом с exe писать нельзя — в «Документы\\Restore\\ipa».
+# installed.txt кладёт установщик; программа для macOS (.app) всегда «установленная»: внутрь .app писать нельзя
+INSTALLED = (HERE / "installed.txt").exists() or (FROZEN and sys.platform == "darwin")
+OUT_DIR = HERE / "ipa" if not INSTALLED and ((HERE / "ipa").is_dir() or _writable(HERE)) \
+    else Path.home() / "Documents" / APP_NAME / "ipa"
 # пароль к зашифрованному файлу сессии; GUI задаёт случайный на каждый запуск и нигде его не хранит
 SESSION_PASSPHRASE = None
+# у консольной версии команды — отдельные процессы, поэтому пароль к сессии лежит в файле (удаляет `logout`)
+KEYCHAIN_PASS = DATA_DIR / "keychain.pass"
 
 
 # ---------- каталог ----------
@@ -117,6 +132,7 @@ def need(binary, hint):
 
 
 SECRET_FLAGS = ("--password", "--keychain-passphrase")
+NEEDS_CODE = re.compile(r"2fa|auth.?code|verification|two.?factor", re.I)  # ipatool просит код подтверждения
 
 
 def masked(cmd):
@@ -128,13 +144,14 @@ def masked(cmd):
     return " ".join(shown)
 
 
-def ipatool_env():
-    """Окружение для ipatool: своя домашняя папка (на Windows ipatool берёт её из HOMEDRIVE+HOMEPATH)."""
-    import os
-    IPATOOL_HOME.mkdir(parents=True, exist_ok=True)
-    drive, rest = os.path.splitdrive(str(IPATOOL_HOME))
-    return dict(os.environ, HOME=str(IPATOOL_HOME), USERPROFILE=str(IPATOOL_HOME), HOMEDRIVE=drive,
-                HOMEPATH=rest or "\\")
+def ipatool_env(home=None):
+    """Окружение для ipatool: своя домашняя папка home (по умолчанию IPATOOL_HOME; на Windows ipatool берёт её
+    из HOMEDRIVE+HOMEPATH) и свой кэш IPATOOL_CACHE (Go ищет его в %LOCALAPPDATA%, на Linux — в XDG_CACHE_HOME)."""
+    home = Path(home or IPATOOL_HOME)
+    home.mkdir(parents=True, exist_ok=True)
+    drive, rest = os.path.splitdrive(str(home))
+    return dict(os.environ, HOME=str(home), USERPROFILE=str(home), HOMEDRIVE=drive, HOMEPATH=rest or "\\",
+                LOCALAPPDATA=str(DATA_DIR), XDG_CACHE_HOME=str(DATA_DIR))
 
 
 def is_ipatool(cmd):
@@ -145,24 +162,19 @@ def keychain_args():
     """Флаги ipatool для работы без консоли.
 
     ipatool хранит сессию в зашифрованном файле и на Windows спрашивает пароль к нему
-    через терминал; у оконной программы терминала нет ("The handle is invalid").
-    Поэтому пароль к хранилищу генерируется один раз, лежит в профиле пользователя
-    и передаётся флагом. Это пароль ТОЛЬКО к локальному файлу сессии, не пароль Apple ID.
+    через терминал; у оконной программы терминала нет ("The handle is invalid"). Поэтому
+    пароль передаётся флагом: у окна — SESSION_PASSPHRASE (случайный, только в памяти),
+    у консольной версии — из KEYCHAIN_PASS (создаётся при первой команде, удаляет `logout`).
+    Это пароль ТОЛЬКО к локальному файлу сессии, не пароль Apple ID.
     """
-    import os
-    import secrets
-
     if SESSION_PASSPHRASE:
         return ["--keychain-passphrase", SESSION_PASSPHRASE, "--non-interactive"]
-    folder = DATA_DIR
-    folder.mkdir(parents=True, exist_ok=True)
-    f = folder / "keychain.pass"
+    f = KEYCHAIN_PASS
+    f.parent.mkdir(parents=True, exist_ok=True)
     if not f.exists() or not f.read_text(encoding="utf-8").strip():
         f.write_text(secrets.token_urlsafe(32), encoding="utf-8")
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(f, 0o600)
-        except OSError:
-            pass
     return ["--keychain-passphrase", f.read_text(encoding="utf-8").strip(), "--non-interactive"]
 
 
@@ -219,14 +231,29 @@ def cmd_login(a):
             cmd += ["--auth-code", code]
         r = run(cmd)
         out = (r.stdout or "") + (r.stderr or "")
-        if r.returncode == 0:
+        # ipatool 2.7 отвечает «2FA code is required…» с кодом возврата 0 — это ещё не вход
+        if r.returncode == 0 and not NEEDS_CODE.search(out):
             print(out.strip() or "Вход выполнен.")
             return 0
-        if not code and re.search(r"2fa|auth.?code|verification|two.?factor", out, re.I):
+        if not code and NEEDS_CODE.search(out):
             code = input("Код двухфакторной аутентификации: ").strip()
-            continue
+            if code:
+                continue
         print(out.strip())
+        print("Вход не удался.")
         return 1
+
+
+def cmd_logout(a):
+    """Завершить сессию: `ipatool auth revoke`, удалить папку сессии и файл с паролем к ней."""
+    ipatool = shutil.which("ipatool")
+    if ipatool and (IPATOOL_HOME / ".ipatool").exists() and KEYCHAIN_PASS.exists():
+        run([ipatool, *keychain_args(), "auth", "revoke"])
+    shutil.rmtree(IPATOOL_HOME / ".ipatool", ignore_errors=True)
+    with contextlib.suppress(OSError):
+        KEYCHAIN_PASS.unlink()
+    print("Сессия Apple ID удалена с компьютера.")
+    return 0
 
 
 def cmd_download(a):
@@ -293,6 +320,9 @@ def main():
     s.add_argument("--email")
     s.add_argument("--code", help="код 2FA, если уже есть")
     s.set_defaults(fn=cmd_login)
+
+    s = sub.add_parser("logout", help="выйти: удалить сессию Apple ID с компьютера")
+    s.set_defaults(fn=cmd_logout)
 
     for name, fn, hlp in (("download", cmd_download, "скачать IPA"),
                           ("restore", cmd_restore, "скачать и установить")):

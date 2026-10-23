@@ -21,9 +21,9 @@ Item {
         onOpened: email.forceActiveFocus()
 
         Logo { size: 56; Layout.alignment: Qt.AlignHCenter }
-        Text { text: "Вход в Apple ID"; color: P.text; font.family: P.font; font.pixelSize: 22; font.bold: true
+        Text { text: "Вход в Apple ID"; color: P.text; font.family: P.font; font.pixelSize: 22; font.weight: Font.Bold
                Layout.alignment: Qt.AlignHCenter }
-        Text { text: backend.loginNote; color: P.muted; font.family: P.font; font.pixelSize: 12
+        Text { textFormat: Text.PlainText; text: backend.loginNote; color: P.muted; font.family: P.font; font.pixelSize: 12
                wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
         Field { id: email; placeholderText: "Apple ID (email)"; onAccepted: password.forceActiveFocus() }
         RowLayout {
@@ -49,7 +49,7 @@ Item {
         width: 400
         closePolicy: Popup.NoAutoClose  // рабочий поток ждёт ответа: закрыть можно только кнопками
         onOpened: { code.text = ""; code.forceActiveFocus() }
-        Text { text: backend.askPrompt; color: P.text; font.family: P.font; font.pixelSize: 13
+        Text { textFormat: Text.PlainText; text: backend.askPrompt; color: P.text; font.family: P.font; font.pixelSize: 13
                wrapMode: Text.WordWrap; Layout.fillWidth: true }
         Field { id: code; placeholderText: "123456"; inputMethodHints: Qt.ImhDigitsOnly
                 onAccepted: backend.answerAsk(code.text, true) }
@@ -65,29 +65,13 @@ Item {
         id: help
         title: "Что нужно для работы"
         width: 560
-        Text { id: helpText; color: P.text; font.family: P.font; font.pixelSize: 13; wrapMode: Text.WordWrap
+        Text { id: helpText; textFormat: Text.PlainText; color: P.text; font.family: P.font; font.pixelSize: 13; wrapMode: Text.WordWrap
                Layout.fillWidth: true; lineHeight: 1.15 }
         Btn { text: "Понятно"; lock: false; Layout.alignment: Qt.AlignRight; onClicked: help.close() }
     }
 
     // ---------- настройки ----------
-    Modal {
-        id: settings
-        title: "Настройки"
-        width: 520
-        RowLayout {
-            Layout.fillWidth: true
-            Text { text: "Магазин (код страны) для проверки наличия"; color: P.text; font.family: P.font
-                   font.pixelSize: 13; Layout.fillWidth: true; wrapMode: Text.WordWrap }
-            Field { Layout.fillWidth: false; implicitWidth: 64; horizontalAlignment: Text.AlignHCenter
-                    text: backend.country; maximumLength: 2; onTextEdited: backend.country = text }
-        }
-        Toggle { text: "В «Моих удалённых» скрывать то, что есть в App Store"; checked: backend.onlyRemoved
-                 onToggled: backend.setOnlyRemoved(checked) }
-        Toggle { text: "Получать лицензию, если приложение ещё продаётся в App Store"; checked: backend.purchase
-                 onToggled: backend.purchase = checked }
-        Btn { text: "Готово"; lock: false; Layout.alignment: Qt.AlignRight; onClicked: settings.close() }
-    }
+    SettingsWindow { id: settings; onSupportRequested: dialogs.openSupport() }
 
     // ---------- поддержать разработчика ----------
     Modal {
@@ -118,7 +102,7 @@ Item {
     Modal {
         id: noticeBox
         width: 420
-        Text { id: noticeText; color: P.text; font.family: P.font; font.pixelSize: 13; wrapMode: Text.WordWrap
+        Text { id: noticeText; textFormat: Text.PlainText; color: P.text; font.family: P.font; font.pixelSize: 13; wrapMode: Text.WordWrap
                Layout.fillWidth: true }
         Btn { text: "OK"; lock: false; kind: "primary"; Layout.alignment: Qt.AlignRight; onClicked: noticeBox.close() }
     }

@@ -4,6 +4,18 @@ import re
 import shutil
 import zipfile
 
+import restore_apps as core
+
+
+def own_pmd_folder():
+    """Папка pymobiledevice3 — в папке программы (DATA_DIR\\pymobiledevice3), а не ~/.pymobiledevice3.
+
+    pymobiledevice3 создаёт её при каждом подключении к iPhone и кладёт туда копию ключа сопряжения (основной
+    хранит служба Apple). Своей настройки для этого у него нет: путь — переменная модуля, её и подменяем.
+    """
+    import pymobiledevice3.common
+    pymobiledevice3.common._HOMEFOLDER = core.DATA_DIR / "pymobiledevice3"
+
 
 def probe_device(timeout=8):
     """Сведения о подключённом iPhone через встроенный pymobiledevice3, без отдельного процесса.
@@ -13,6 +25,7 @@ def probe_device(timeout=8):
     try:
         import asyncio
         from pymobiledevice3.lockdown import create_using_usbmux
+        own_pmd_folder()
     except Exception:  # noqa: BLE001 — модуль может отсутствовать при запуске из исходников
         return None
 

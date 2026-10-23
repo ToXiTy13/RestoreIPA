@@ -1,0 +1,164 @@
+"""Настройки (окно «Настройки»): тема и цвет акцента, папка загрузок, уведомления, проверка обновлений.
+Хранятся в settings.json в папке программы (storage.SETTINGS); свойства для QML объявлены в Backend."""
+import json
+import threading
+import urllib.request
+from pathlib import Path
+
+from PySide6.QtCore import QFile, Qt
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QFileDialog
+
+import restore_apps as core
+
+from . import storage, theme
+from .catalog import plural
+from .device import vtuple
+
+REPO = "ToXiTy13/RestoreIPA"
+REPO_URL = f"https://github.com/{REPO}"
+NOTIFY_AFTER_S = 5  # мигать значком на панели задач, только если операция шла дольше
+# что из свойств Backend сохраняется между запусками, и проверка значения из файла
+SAVED = {
+    "themeMode": lambda v: v in ("system", "light", "dark"),
+    "accentName": lambda v: v in theme.ACCENTS,
+    "country": lambda v: isinstance(v, str) and len(v) <= 2,
+    "onlyRemoved": lambda v: isinstance(v, bool),
+    "purchase": lambda v: isinstance(v, bool),
+    "deleteAfterInstall": lambda v: isinstance(v, bool),
+    "notifyDone": lambda v: isinstance(v, bool),
+}
+
+
+def writable_dir(path):
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".restore_write_test"
+        probe.write_text("")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+class PrefsMixin:
+    def load_prefs(self):
+        """Прочитать settings.json и применить; дальше каждое изменение сразу пишется на диск."""
+        self.default_out = core.OUT_DIR
+        saved = storage.load_settings()
+        for key, ok in SAVED.items():
+            if key in saved and ok(saved[key]):
+                setattr(self, "_" + key, saved[key])
+        folder = saved.get("ipaDir")
+        if isinstance(folder, str) and folder and writable_dir(Path(folder)):
+            core.OUT_DIR = Path(folder)
+        self._ipaDir = str(core.OUT_DIR)
+        for key in (*SAVED, "ipaDir"):
+            getattr(self, key + "Changed").connect(self.save_prefs)
+        for key in ("themeMode", "accentName"):
+            getattr(self, key + "Changed").connect(self.apply_theme)
+        hints = QGuiApplication.styleHints()
+        hints.colorSchemeChanged.connect(lambda _scheme: self._themeMode == "system" and self.paletteChanged.emit())
+        self.apply_theme()
+
+    def save_prefs(self):
+        data = {key: getattr(self, "_" + key) for key in SAVED}
+        if Path(self._ipaDir) != self.default_out:
+            data["ipaDir"] = self._ipaDir
+        storage.save_settings(data)
+
+    # ---------- тема ----------
+    def is_dark(self):
+        if self._themeMode != "system":
+            return self._themeMode == "dark"
+        return QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+
+    def current_palette(self):
+        return theme.palette(self.is_dark(), self._accentName)
+
+    def apply_theme(self):
+        # заголовок окна Windows (светлый/тёмный) Qt рисует по схеме приложения; Unknown — как в системе
+        QGuiApplication.styleHints().setColorScheme(
+            {"light": Qt.ColorScheme.Light, "dark": Qt.ColorScheme.Dark}.get(self._themeMode, Qt.ColorScheme.Unknown))
+        self.paletteChanged.emit()
+
+    def accent_list(self):
+        return [{"key": k, "title": t, "color": light["accent"], "grad1": light["grad1"], "grad2": light["grad2"]}
+                for k, (t, light, _dark) in theme.ACCENTS.items()]
+
+    # ---------- загрузки ----------
+    def ipa_files(self):
+        return sorted(core.OUT_DIR.glob("*.ipa"), key=lambda p: p.stat().st_mtime, reverse=True) \
+            if core.OUT_DIR.exists() else []
+
+    def update_ipa_summary(self, files):
+        if not files:
+            self.ipaSummary = "Скачанных файлов нет"
+            return
+        size = sum(p.stat().st_size for p in files) / 1024 ** 3
+        n = len(files)
+        self.ipaSummary = f"{n} {plural(n, 'файл', 'файла', 'файлов')} · " + \
+            (f"{size:.1f} ГБ".replace(".", ",") if size >= 0.1 else f"{size * 1024:.0f} МБ")
+
+    def choose_ipa_dir(self):
+        with storage.registry_untouched():  # QFileDialog запоминает папку в реестре — см. registry_untouched
+            path = QFileDialog.getExistingDirectory(None, "Папка для скачанных .ipa", str(core.OUT_DIR))
+        if path:
+            self.set_ipa_dir(Path(path))
+
+    def set_ipa_dir(self, path):
+        if not writable_dir(path):
+            self.show_notice("Папка загрузок", f"В эту папку нельзя записывать файлы:\n{path}")
+            return
+        core.OUT_DIR = path
+        self.ipaDir = str(path)
+        self.refresh_ipa()
+        self.log(f"Скачанные .ipa теперь сохраняются в {path}")
+
+    def clear_ipa(self):
+        files = self.ipa_files()
+        if not files:
+            return
+        if not self.ask_yes_no("Скачанные файлы", f"Переместить в корзину все скачанные .ipa ({self._ipaSummary})?\n\n"
+                                                  "Приложения на iPhone это не затронет; нужную версию можно будет "
+                                                  "скачать заново."):
+            return
+        left = [p for p in files if not QFile.moveToTrash(str(p))]
+        self.refresh_ipa()
+        self.log(f"В корзину перемещено файлов: {len(files) - len(left)}"
+                 + (f"; не удалось: {len(left)} (заняты другой программой?)" if left else ""))
+
+    def drop_installed(self, ipa):
+        """После установки: удалить .ipa, если так выбрано в настройках (из рабочего потока)."""
+        if not self._deleteAfterInstall:
+            return
+        try:
+            Path(ipa).unlink()
+            self.log(f"Файл удалён после установки (см. «Настройки» → «Загрузки»): {Path(ipa).name}")
+        except OSError as e:
+            self.log(f"Не удалось удалить {Path(ipa).name}: {e}")
+        self.post(self.refresh_ipa)
+
+    # ---------- обновления ----------
+    def check_updates(self):
+        self.updateText, self.updateUrl = "Проверяю…", ""
+
+        def run():
+            try:
+                req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
+                                             headers={"User-Agent": "Restore", "Accept": "application/vnd.github+json"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    rel = json.load(r)
+                tag = str(rel.get("tag_name", "")).lstrip("vV")
+                if tag and vtuple(tag) > vtuple(core.__version__):
+                    url = str(rel.get("html_url") or "")
+                    if not url.startswith(REPO_URL + "/releases/"):  # ссылка — только на релиз нашего репозитория
+                        url = REPO_URL + "/releases/latest"
+                    text = f"Доступна версия {tag}"
+                else:
+                    text, url = f"У вас последняя версия ({core.__version__})", ""
+            except Exception:  # noqa: BLE001 — нет сети, лимит GitHub, неожиданный ответ
+                text, url = "Не удалось проверить: нет связи с GitHub", ""
+            self.post(lambda: (setattr(self, "updateText", text), setattr(self, "updateUrl", url)))
+
+        threading.Thread(target=run, daemon=True).start()

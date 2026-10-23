@@ -15,19 +15,25 @@ Rectangle {
     required property string statusKind
     required property bool selected
     property string listName: "apps"
+    readonly property bool last: ListView.view ? index === ListView.view.count - 1 : true
 
-    width: ListView.view ? ListView.view.width - 14 : 600
-    height: 64
-    radius: 14
-    color: hover.hovered ? P.cardHover : P.card
-    border.color: selected ? P.accent : P.border
-    border.width: selected ? 2 : 1
-    scale: tap.pressed ? 0.99 : 1
-    Behavior on color { ColorAnimation { duration: 120 } }
-    Behavior on scale { NumberAnimation { duration: 90 } }
+    width: ListView.view ? ListView.view.width - 10 : 600
+    height: 62
+    radius: 10
+    color: selected ? P.accentSoft : (hover.hovered ? P.cardHover : P.card)
+    Behavior on color { ColorAnimation { duration: 110 } }
 
     HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
     TapHandler { id: tap; onTapped: backend.openDetail(row.listName, row.index) }
+
+    // разделитель — от начала текста до края, как в списках iOS; у выделенной/наведённой строки и последней не нужен
+    Rectangle {
+        visible: !row.last && !row.selected && !hover.hovered
+        anchors.bottom: parent.bottom
+        x: 14 + 22 + 12 + 42 + 12
+        width: parent.width - x - 12; height: 1
+        color: P.border
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -35,23 +41,26 @@ Rectangle {
         anchors.rightMargin: 14
         spacing: 12
         CheckDot { checked: row.selected; onToggled: backend.toggleSelected(row.listName, row.index) }
-        AppIcon { icon: row.icon; letter: row.letter; tint: row.tint }
+        AppIcon {
+            icon: row.icon; letter: row.letter; tint: row.tint
+            scale: tap.pressed ? 0.94 : 1
+            Behavior on scale { NumberAnimation { duration: 90 } }
+        }
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 1
-            Text { text: row.title; color: P.text; font.family: P.font; font.pixelSize: 14
+            Text { textFormat: Text.PlainText; text: row.title; color: P.text; font.family: P.font; font.pixelSize: 14; font.weight: Font.DemiBold
                    elide: Text.ElideRight; Layout.fillWidth: true }
-            Text { text: row.sub; color: P.muted; font.family: P.font; font.pixelSize: 11
+            Text { textFormat: Text.PlainText; text: row.sub; color: P.muted; font.family: P.font; font.pixelSize: 12
                    visible: text.length > 0; elide: Text.ElideRight; Layout.fillWidth: true }
         }
-        Rectangle {
+        Text {
             visible: row.status !== ""
-            height: 24; radius: 12
-            width: pill.implicitWidth + 20
-            color: row.statusKind === "ok" ? P.okBg : P.second
-            Text { id: pill; anchors.centerIn: parent; text: row.status; font.family: P.font; font.pixelSize: 11
-                   color: row.statusKind === "ok" ? P.ok : P.muted }
+            textFormat: Text.PlainText
+            text: row.status
+            font.family: P.font; font.pixelSize: 12; font.weight: Font.DemiBold
+            color: row.statusKind === "ok" ? P.ok : P.muted
         }
-        Text { text: "›"; color: P.muted; font.pixelSize: 22 }
+        Text { text: "›"; color: hover.hovered ? P.accentText : P.disabled; font.pixelSize: 22 }
     }
 }

@@ -1,0 +1,22 @@
+# Скачанные IPA: внутри Apple ID и имя владельца (iTunesMetadata.plist) и DRM, привязанный к аккаунту
+*.ipa
+ipa/
+
+# Сборка: exe и установщик — выкладывать через Releases
+*.exe
+dist/
+build/
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Служебные файлы программы, если вдруг окажутся рядом
+keychain.pass
+email.txt
+history.json
+versions_cache.json
+/installed.txt

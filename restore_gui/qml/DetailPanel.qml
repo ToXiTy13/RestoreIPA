@@ -10,7 +10,7 @@ Drawer {
     height: parent.height
     modal: true
     dragMargin: 0  // открывается только по нажатию на приложение
-    Overlay.modal: Rectangle { color: "#80000000" }
+    Overlay.modal: Rectangle { color: P.shade }
     background: Rectangle {
         color: P.bg
         Rectangle { width: 1; height: parent.height; color: P.border }
@@ -39,8 +39,8 @@ Drawer {
                       tint: backend.detailApp.tint || P.accent }
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 2
-                Text { text: backend.detailApp.name || ""; color: P.text; font.family: P.font; font.pixelSize: 19
-                       font.bold: true; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                Text { textFormat: Text.PlainText; text: backend.detailApp.name || ""; color: P.text; font.family: P.font; font.pixelSize: 19
+                       font.weight: Font.Bold; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                 Text {
                     text: "App ID " + (backend.detailApp.id || "")
                     color: idHover.hovered ? P.text : P.muted; font.family: P.font; font.pixelSize: 11
@@ -69,7 +69,7 @@ Drawer {
                 Rectangle {
                     Layout.fillWidth: true
                     implicitHeight: checksCol.implicitHeight + 24
-                    radius: 16; color: P.card; border.color: P.border
+                    radius: 14; color: P.card
                     ColumnLayout {
                         id: checksCol
                         anchors.fill: parent; anchors.margins: 12; anchors.leftMargin: 16
@@ -83,8 +83,8 @@ Drawer {
                                 spacing: 10
                                 Text { text: modelData[1]; color: P.muted; font.family: P.font; font.pixelSize: 12
                                        Layout.preferredWidth: 80 }
-                                Text { text: check.text || ""; color: panel.kindColor(check.kind)
-                                       font.family: P.font; font.pixelSize: 12; font.bold: true
+                                Text { textFormat: Text.PlainText; text: check.text || ""; color: panel.kindColor(check.kind)
+                                       font.family: P.font; font.pixelSize: 12; font.weight: Font.Bold
                                        wrapMode: Text.WordWrap; Layout.fillWidth: true }
                             }
                         }
@@ -92,13 +92,13 @@ Drawer {
                 }
 
                 // ---------- версии ----------
-                Text { text: backend.versionHead; color: P.muted; font.family: P.font; font.pixelSize: 12
-                       font.bold: true; Layout.topMargin: 4 }
+                Text { textFormat: Text.PlainText; text: backend.versionHead; color: P.muted; font.family: P.font; font.pixelSize: 12
+                       font.weight: Font.Bold; Layout.topMargin: 4 }
 
                 Rectangle {
                     Layout.fillWidth: true
                     implicitHeight: versionsCol.implicitHeight + 20
-                    radius: 16; color: P.card; border.color: P.border
+                    radius: 14; color: P.card
                     ColumnLayout {
                         id: versionsCol
                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
@@ -119,15 +119,15 @@ Drawer {
                             spacing: 8
                             Text { text: "Не удалось получить версии — проверка не прошла. Это ошибка, а не «нет в истории»: "
                                          + "приложение может быть в ваших покупках."
-                                   color: P.warn; font.family: P.font; font.pixelSize: 12; font.bold: true
+                                   color: P.warn; font.family: P.font; font.pixelSize: 12; font.weight: Font.Bold
                                    wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                            Text { text: backend.detailErr; color: P.text; font.family: P.font; font.pixelSize: 12
+                            Text { textFormat: Text.PlainText; text: backend.detailErr; color: P.text; font.family: P.font; font.pixelSize: 12
                                    wrapMode: Text.WordWrap; Layout.fillWidth: true }
                             Text { text: "Ответ Apple (ipatool)"; color: P.muted; font.family: P.font; font.pixelSize: 10
-                                   font.bold: true }
+                                   font.weight: Font.Bold }
                             TextArea {
                                 Layout.fillWidth: true
-                                text: backend.detailAnswer
+                                textFormat: TextEdit.PlainText; text: backend.detailAnswer
                                 readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
                                 color: P.text; font.family: "Consolas"; font.pixelSize: 11
                                 background: Rectangle { radius: 8; color: P.field }
@@ -154,7 +154,7 @@ Drawer {
                                 readonly property bool chosen: backend.selectedVersion === value
                                 Layout.fillWidth: true
                                 height: 50; radius: 10
-                                color: chosen ? P.accentDim : (verHover.hovered ? P.cardHover : "transparent")
+                                color: chosen ? P.accentSoft : (verHover.hovered ? P.cardHover : P.card)
                                 Behavior on color { ColorAnimation { duration: 120 } }
                                 HoverHandler { id: verHover; cursorShape: Qt.PointingHandCursor }
                                 TapHandler { onTapped: backend.selectedVersion = ver.value }
@@ -170,9 +170,9 @@ Drawer {
                                     }
                                     ColumnLayout {
                                         Layout.fillWidth: true; spacing: 0
-                                        Text { text: ver.title; color: P.text; font.family: P.font; font.pixelSize: 12
-                                               font.bold: true; Layout.fillWidth: true }
-                                        Text { text: ver.sub; color: ver.mine ? P.ok : P.muted; font.family: P.font
+                                        Text { textFormat: Text.PlainText; text: ver.title; color: P.text; font.family: P.font; font.pixelSize: 12
+                                               font.weight: Font.Bold; Layout.fillWidth: true }
+                                        Text { textFormat: Text.PlainText; text: ver.sub; color: ver.mine ? P.ok : P.muted; font.family: P.font
                                                font.pixelSize: 10; Layout.fillWidth: true }
                                     }
                                 }
@@ -193,8 +193,8 @@ Drawer {
                     visible: backend.cloneHead !== ""
                     Layout.fillWidth: true
                     spacing: 6
-                    Text { text: backend.cloneHead; color: backend.cloneHeadOk ? P.ok : P.muted; font.family: P.font
-                           font.pixelSize: 12; font.bold: true }
+                    Text { textFormat: Text.PlainText; text: backend.cloneHead; color: backend.cloneHeadOk ? P.ok : P.muted; font.family: P.font
+                           font.pixelSize: 12; font.weight: Font.Bold }
                     Text { text: "Это же приложение публиковали под видом других программ. Если вы ставили такую копию, "
                                  + "она в истории вашего Apple ID под своим ID — нажмите на неё, чтобы увидеть её версии."
                            color: P.muted; font.family: P.font; font.pixelSize: 11; wrapMode: Text.WordWrap
@@ -223,12 +223,12 @@ Drawer {
                                 AppIcon { size: 32; icon: clone.icon; letter: clone.letter; tint: clone.tint }
                                 ColumnLayout {
                                     Layout.fillWidth: true; spacing: 0
-                                    Text { text: clone.title; color: P.text; font.family: P.font; font.pixelSize: 12
-                                           font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
-                                    Text { text: clone.sub; color: P.muted; font.family: P.font; font.pixelSize: 10
+                                    Text { textFormat: Text.PlainText; text: clone.title; color: P.text; font.family: P.font; font.pixelSize: 12
+                                           font.weight: Font.Bold; elide: Text.ElideRight; Layout.fillWidth: true }
+                                    Text { textFormat: Text.PlainText; text: clone.sub; color: P.muted; font.family: P.font; font.pixelSize: 10
                                            elide: Text.ElideRight; Layout.fillWidth: true }
                                 }
-                                Text { text: clone.status; color: panel.kindColor(clone.statusKind)
+                                Text { textFormat: Text.PlainText; text: clone.status; color: panel.kindColor(clone.statusKind)
                                        font.family: P.font; font.pixelSize: 11 }
                                 Text { text: "›"; color: P.muted; font.pixelSize: 18 }
                             }

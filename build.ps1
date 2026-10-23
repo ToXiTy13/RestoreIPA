@@ -73,7 +73,7 @@ Write-Host "Тесты"
 Invoke-Native $py -m unittest discover -s tests -q
 
 # --- exe: портативный одним файлом и папкой для установщика (см. RestoreAppStore.spec) ---
-if (-not (Test-Path assets\icon.ico)) { Invoke-Native $py tools\make_icon.py }
+if (-not (Test-Path assets\icon.ico)) { Invoke-Native $py installer\make_art.py }  # иконка и картинки установщика
 $version = (& $py tools\write_version_info.py build\version_info.txt).Trim()
 if ($LASTEXITCODE) { throw "Не удалось записать версию" }
 foreach ($onedir in "0", "1") {

@@ -7,8 +7,8 @@ Rectangle {
     property bool checked: false
     signal toggled()
     width: 22; height: 22; radius: 11
-    color: checked ? P.accent : "transparent"
-    border.color: checked ? P.accent : (area.containsMouse ? P.muted : P.borderLight)
+    color: checked ? P.accent : P.card
+    border.color: checked ? P.accent : (area.containsMouse ? P.accent : P.borderLight)
     border.width: 2
     Behavior on color { ColorAnimation { duration: 120 } }
     Text { anchors.centerIn: parent; text: "✓"; color: "white"; font.pixelSize: 13; font.bold: true; visible: c.checked }

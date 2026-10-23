@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Сборка: build.ps1 (он же скачивает и проверяет ресурсы в build\res).
+# Сборка: build.ps1 (он же скачивает и проверяет ресурсы в build/res).
 # Каталог и иконка — из репозитория; ipatool.exe, libunicorn.dll и лицензия Unicorn — из build\res.
 # Всё кладётся в корень ресурсов (core.BUNDLE).
 # Два варианта (RESTORE_ONEDIR):
@@ -7,16 +7,22 @@
 #   1 — dist\RestoreAppStore\ папкой (для установщика): распаковывать нечего, запускается в разы быстрее.
 import os
 import re
+import sys
 
 from PyInstaller.utils.hooks import collect_all
 
 ONEDIR = os.environ.get("RESTORE_ONEDIR") == "1"
+MAC = sys.platform == "darwin"  # macOS: всегда Restore.app (папкой), ipatool для Mac, без Unicorn и ресурса версии
 
 RES = "build/res"
 datas = [("removed_ru_appstore_app_ids.csv", "."), ("assets/icon.ico", "."), ("assets/cloudtips_qr.png", "."),
-         (f"{RES}/UNICORN_COPYING.txt", "."),
-         ("restore_gui/qml", "restore_gui/qml")]  # интерфейс (QML) — рядом с модулями пакета, см. app.QML_DIR
-binaries = [(f"{RES}/ipatool.exe", "."), (f"{RES}/libunicorn.dll", ".")]
+         ("restore_gui/qml", "restore_gui/qml"),  # интерфейс (QML) — рядом с модулями пакета, см. app.QML_DIR
+         ("restore_gui/fonts", "restore_gui/fonts")]  # шрифт Manrope и его лицензия OFL
+if MAC:
+    binaries = [(f"{RES}/ipatool", ".")]  # Unicorn ipatool нужен только на Windows
+else:
+    datas.append((f"{RES}/UNICORN_COPYING.txt", "."))
+    binaries = [(f"{RES}/ipatool.exe", "."), (f"{RES}/libunicorn.dll", ".")]
 # segno — QR-код в «Поддержать», если нет картинки; модули Qt ниже нужны QML и импортируются не из Python
 hiddenimports = ["restore_apps", "segno", "PySide6.QtQuick", "PySide6.QtQuickControls2"]
 # pymobiledevice3 встроен для режима `exe --pmd` (установка IPA); подмодули он грузит динамически.
@@ -37,7 +43,9 @@ a = Analysis(
     # pymobiledevice3 тянет консоль IPython (с jedi/parso — 5,5 тыс. файлов) и PyAV (видеокодеки, 64 МБ).
     # Оба импортируются лениво — только в `shell` и `serve-vnc`, которые программе не нужны.
     # Pillow ему нужен только для трансляции экрана в веб-инспекторе (cdp_screencast) — тоже не используется.
-    excludes=["IPython", "jedi", "parso", "traitlets", "av", "PIL"],
+    # sslpsk_pmd3 (TLS-PSK для беспроводных туннелей iOS 17+) установке по кабелю не нужен, а на macOS везёт свой
+    # старый libcrypto.3.dylib, который подменяет нужный cryptography (на Intel тот падает: нет EVP_DigestSqueeze)
+    excludes=["IPython", "jedi", "parso", "traitlets", "av", "PIL"] + (["sslpsk_pmd3"] if MAC else []),
     noarchive=False,
 )
 
@@ -56,11 +64,22 @@ DROP = re.compile(
     r"|vectorimage|quicklayouts?designer"
 )
 
+# на macOS QtGui ссылается на QtDBus, а модуль QtQuick — на QtOpenGL (на Windows ни то ни другое не нужно)
+MAC_KEEP = re.compile(r"qtdbus|qtopengl(?!widgets)")
+
 
 def needed(entry):
     dest = entry[0].replace("\\", "/").lower()
     if "/translations/" in dest:  # переводы Qt: оставляем только русский для стандартных окон
         return dest.endswith("qtbase_ru.qm")
+    if MAC and MAC_KEEP.search(dest):
+        return True
+    if len(entry) > 2 and entry[2] == "SYMLINK":
+        # на macOS у каждого фреймворка Qt есть ссылка вида «QtWebSockets» -> PySide6/…/QtWebSockets.framework;
+        # если сам фреймворк вырезан, ссылка остаётся битой и ломает подпись .app — проверяем, куда она ведёт
+        target = str(entry[1]).replace("\\", "/").lower()
+        if "pyside6" in target and DROP.search(target) and not (MAC and MAC_KEEP.search(target)):
+            return False
     return not ("pyside6" in dest and DROP.search(dest))
 
 
@@ -69,7 +88,17 @@ a.datas = [e for e in a.datas if needed(e)]
 pyz = PYZ(a.pure)
 common = dict(name="RestoreAppStore", icon="assets/icon.ico", version="build/version_info.txt", console=False,
               upx=False)
-if ONEDIR:
+if MAC:
+    VERSION = re.search(r'__version__\s*=\s*"([^"]+)"', open("restore_apps.py", encoding="utf-8").read()).group(1)
+    exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="RestoreAppStore", console=False, upx=False)
+    coll = COLLECT(exe, a.binaries, a.datas, name="RestoreAppStore", upx=False)
+    app = BUNDLE(coll, name="Restore.app", icon=f"{RES}/icon.icns", bundle_identifier="io.github.toxity13.restore",
+                 version=VERSION,
+                 info_plist={"CFBundleDisplayName": "Restore", "CFBundleShortVersionString": VERSION,
+                             "CFBundleVersion": VERSION, "LSMinimumSystemVersion": "12.0",
+                             "NSHighResolutionCapable": True,
+                             "LSApplicationCategoryType": "public.app-category.utilities"})
+elif ONEDIR:
     exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **common)
     coll = COLLECT(exe, a.binaries, a.datas, name="RestoreAppStore", upx=False)
 else:

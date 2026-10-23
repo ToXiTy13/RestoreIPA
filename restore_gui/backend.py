@@ -3,11 +3,13 @@
 Логика долгих операций — в TasksMixin (tasks.py) и DetailMixin (detail.py); они работают в рабочих потоках
 и трогают окно только через post(fn) — fn выполнится в главном потоке.
 """
+import contextlib
 import datetime
 import re
 import secrets
-import tempfile
+import sys
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
@@ -17,10 +19,12 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox
 import restore_apps as core
 
 from . import storage, theme
+from .apple import close_procs, scan_copies
 from .catalog import Catalog, parse_app_ref, plural, split_disguise
 from .detail import DetailMixin
 from .icons import IconLoader, cached
 from .models import RowsModel
+from .prefs import NOTIFY_AFTER_S, REPO_URL, PrefsMixin
 from .tasks import TasksMixin
 
 # страница CloudTips для «Поддержать разработчика»; пустая строка — кнопка не показывается.
@@ -47,7 +51,7 @@ def qprop(type_, name):
     return changed, Property(type_, fget, fset, notify=changed)
 
 
-class Backend(QObject, TasksMixin, DetailMixin):
+class Backend(QObject, TasksMixin, DetailMixin, PrefsMixin):
     DEFAULTS = {
         "page": "home", "loggedIn": False, "account": "", "deviceState": "none", "deviceText": "iPhone не подключён",
         "busy": False, "status": "", "selectedCount": 0, "selectedText": "", "category": "Все", "logOpen": False,
@@ -56,6 +60,9 @@ class Backend(QObject, TasksMixin, DetailMixin):
         "detailOpen": False, "detailApp": {}, "detailChecks": {}, "cloneHead": "", "cloneHeadOk": False,
         "versionHead": "Версия", "versionMode": "loading", "detailErr": "", "detailAnswer": "", "moreText": "",
         "actionsEnabled": False, "selectedVersion": "",
+        # настройки (prefs.py)
+        "themeMode": "system", "accentName": "emerald", "ipaDir": "", "deleteAfterInstall": False,
+        "notifyDone": True, "ipaSummary": "", "updateText": "", "updateUrl": "",
     }
     pageChanged, page = qprop(str, "page")
     loggedInChanged, loggedIn = qprop(bool, "loggedIn")
@@ -88,9 +95,19 @@ class Backend(QObject, TasksMixin, DetailMixin):
     moreTextChanged, moreText = qprop(str, "moreText")
     actionsEnabledChanged, actionsEnabled = qprop(bool, "actionsEnabled")
     selectedVersionChanged, selectedVersion = qprop(str, "selectedVersion")
+    themeModeChanged, themeMode = qprop(str, "themeMode")  # system / light / dark
+    accentNameChanged, accentName = qprop(str, "accentName")  # ключ theme.ACCENTS
+    ipaDirChanged, ipaDir = qprop(str, "ipaDir")
+    deleteAfterInstallChanged, deleteAfterInstall = qprop(bool, "deleteAfterInstall")
+    notifyDoneChanged, notifyDone = qprop(bool, "notifyDone")
+    ipaSummaryChanged, ipaSummary = qprop(str, "ipaSummary")
+    updateTextChanged, updateText = qprop(str, "updateText")
+    updateUrlChanged, updateUrl = qprop(str, "updateUrl")
 
     logAppended = Signal(str)
     noticeRequested = Signal(str, str)  # заголовок, текст
+    paletteChanged = Signal()  # сменилась тема или акцент: app.py передаёт QML новую палитру P
+    taskFinished = Signal()  # долгая операция закончилась — окно мигнёт на панели задач, если не в фокусе
     _posted = Signal(object)
 
     def __init__(self, background=True):
@@ -99,11 +116,14 @@ class Backend(QObject, TasksMixin, DetailMixin):
         for k, v in self.DEFAULTS.items():
             setattr(self, "_" + k, v)
         core.SESSION_PASSPHRASE = secrets.token_urlsafe(32)  # только в памяти, на диск не пишется
-        try:
-            (Path.home() / ".restore_appstore" / "keychain.pass").unlink()  # пароль к сессии из ранних версий
-        except OSError:
-            pass
+        # пароль к сессии открытым текстом: из ранних версий и от консольной версии (её сессию окно всё равно стирает)
+        for old in (Path.home() / ".restore_appstore" / "keychain.pass", core.KEYCHAIN_PASS):
+            with contextlib.suppress(OSError):
+                old.unlink()
         storage.forget_email()  # email.txt прежних версий: email Apple ID на диске не храним
+        storage.remove_leftovers()
+        self._busy_since = 0.0
+        self.load_prefs()
         self.catalog = Catalog(core.load_catalog())
         self.purchases = []
         self.avail = None  # ID покупок, которые сейчас есть в сторе; None — не проверялось
@@ -144,11 +164,12 @@ class Backend(QObject, TasksMixin, DetailMixin):
     def start_background(self):
         # сессия живёт только пока открыта программа: остатки прошлого запуска (например, после сбоя) стираем.
         # `ipatool auth revoke` может идти секунды — в фоне; кнопки на это время заблокированы (start).
-        if (core.IPATOOL_HOME / ".ipatool").exists() or any(Path(tempfile.gettempdir()).glob("restore_scan_*")):
+        if (core.IPATOOL_HOME / ".ipatool").exists() or scan_copies():
             self.start("Удаление сессии прошлого запуска", self.task_wipe_old)
         # слежение за iPhone импортирует pymobiledevice3 (секунду с лишним под GIL): сначала дорисуем окно
         QTimer.singleShot(1000, lambda: [threading.Thread(target=fn, daemon=True).start()
-                                         for fn in (self._prepare_engine, self.watch_device)])
+                                         for fn in (self._prepare_engine, self.watch_device,
+                                                    storage.remove_stale_unpacked)])
         QTimer.singleShot(1500, lambda: self.icons.start(a["id"] for a in self.catalog.apps))
 
     def task_wipe_old(self):
@@ -165,7 +186,9 @@ class Backend(QObject, TasksMixin, DetailMixin):
     categories = Property("QVariantList", lambda self: ["Все"] + self.catalog.categories, constant=True)
     supportUrl = Property(str, lambda self: SUPPORT_URL, constant=True)
     version = Property(str, lambda self: core.__version__, constant=True)
-    palette = Property("QVariantMap", lambda self: theme.QML, constant=True)
+    accents = Property("QVariantList", lambda self: self.accent_list(), constant=True)
+    repoUrl = Property(str, lambda self: REPO_URL, constant=True)
+    defaultIpaDir = Property(str, lambda self: str(self.default_out), constant=True)
 
     @Property(str, constant=True)
     def greeting(self):
@@ -219,6 +242,10 @@ class Backend(QObject, TasksMixin, DetailMixin):
         self.post(lambda: setattr(self, "status", text))
 
     def set_busy(self, value):
+        if value:
+            self._busy_since = time.monotonic()
+        elif self._busy and self._notifyDone and time.monotonic() - self._busy_since >= NOTIFY_AFTER_S:
+            self.taskFinished.emit()
         self.busy = value
 
     def open_log(self):
@@ -231,7 +258,8 @@ class Backend(QObject, TasksMixin, DetailMixin):
         return QMessageBox.question(None, title, text) == QMessageBox.Yes
 
     def ask_file(self, title, folder, filters):
-        path, _ = QFileDialog.getOpenFileName(None, title, str(folder), filters)
+        with storage.registry_untouched():  # QFileDialog запоминает папку в реестре — см. registry_untouched
+            path, _ = QFileDialog.getOpenFileName(None, title, str(folder), filters)
         return path or None
 
     def ask_main(self, title, prompt):
@@ -329,7 +357,7 @@ class Backend(QObject, TasksMixin, DetailMixin):
         return [dict(self.catalog.byid.get(a["id"], {}), **a) for a in base]
 
     def refresh_mine(self):
-        self._mine.set_items(self.my_removed())
+        self._mine.update_items(self.my_removed())  # без сброса: прокрутка «Мои» остаётся на месте
 
     @Slot(bool)
     def setOnlyRemoved(self, on):
@@ -337,8 +365,8 @@ class Backend(QObject, TasksMixin, DetailMixin):
         self.refresh_mine()
 
     def refresh_ipa(self):
-        files = sorted(core.OUT_DIR.glob("*.ipa"), key=lambda p: p.stat().st_mtime, reverse=True) \
-            if core.OUT_DIR.exists() else []
+        files = self.ipa_files()
+        self.update_ipa_summary(files)
         rows = []
         for p in files[:200]:
             m = re.search(r"_(\d{6,12})(?:_v(\d+))?\.ipa$", p.name)
@@ -428,13 +456,32 @@ class Backend(QObject, TasksMixin, DetailMixin):
         if self._busy:
             self.show_notice("Подождите", "Сначала дождитесь окончания текущей операции или нажмите «Остановить».")
             return
-        self.wipe_session()
+        # всё, что знали об аккаунте, забываем сразу: на общем компьютере следующий человек не должен видеть
+        # чужие покупки, а его находки — смешиваться с ними
         storage.forget_email()
+        self.close_detail()  # её проверки больше не повторяются (d["alive"] = False)
+        self.purchases, self.avail = [], None
         self.owned_state.clear()
+        self.clear_selection()
         self.refresh_list_keep()
         self.on_login_result(False, "")
-        self.log("Вы вышли из Apple ID, сессия и email удалены с компьютера.")
         self.showPage("home")
+        self.start("Выход из Apple ID", self.task_logout)  # сессию — в фоне: revoke идёт секунды
+
+    def add_found(self, found):
+        """Найденное «Найти мои удалённые» — в «Мои»: к уже загруженным покупкам, без перехода на страницу
+        (поиск идёт минутами, а находки приходят по одной — человек тем временем может смотреть каталог)."""
+        known = {a["id"] for a in self.purchases}
+        self.purchases = sorted(self.purchases + [{"id": i, "name": n} for i, n in found.items() if i not in known],
+                                key=lambda a: a["name"].casefold())
+        for i in found:
+            self.owned_state[i] = True
+        # только строки найденных: пересчёт всех ~1400 строк на каждую находку дольше кадра — окно теряло кадры
+        for m in (self._popular, self._apps):
+            m.refresh_keys(list(found))
+        if self.detail is not None:
+            self.paint_clones(self.detail)
+        self.refresh_mine()
 
     def on_purchases_result(self, acc, avail):
         self.purchases = [{"id": i, "name": n} for i, n in sorted(acc.items(), key=lambda kv: kv[1].casefold())]
@@ -485,6 +532,10 @@ class Backend(QObject, TasksMixin, DetailMixin):
 
     @Slot(str)
     def openUrl(self, url):
+        # только известные ссылки: страница доната и релизы/страница программы на GitHub
+        if not (url == SUPPORT_URL or url == REPO_URL or url.startswith(REPO_URL + "/")):
+            self.log(f"Ссылка не открыта — она не из списка ссылок программы: {url}")
+            return
         if not QDesktopServices.openUrl(QUrl(url)):
             self.log(f"Не удалось открыть браузер. Ссылка: {url}")
 
@@ -496,15 +547,38 @@ class Backend(QObject, TasksMixin, DetailMixin):
     def helpText(self):
         return (
             "1. iPhone и кабель. Разблокируйте телефон и нажмите «Доверять».\n\n"
-            "2. Драйвер Apple на Windows: iTunes или «Устройства Apple» (Apple Devices) из Microsoft Store.\n\n"
-            "3. Apple ID, под которым приложение когда-то скачивалось. Apple отдаёт только то, что есть в "
+            + ("2. На Mac ничего дополнительно ставить не нужно: iPhone macOS видит сама.\n\n"
+               if sys.platform == "darwin" else
+               "2. Драйвер Apple на Windows: iTunes или «Устройства Apple» (Apple Devices) из Microsoft Store.\n\n")
+            + "3. Apple ID, под которым приложение когда-то скачивалось. Apple отдаёт только то, что есть в "
             "истории покупок этого аккаунта.\n\n"
             "4. Самый первый вход на компьютере может занять до 10–15 минут: ipatool скачивает служебные "
             "файлы Apple.\n\n"
-            "5. Если вход или скачивание не работает — «Связь» внизу слева. Частые причины: DNS «для обхода "
-            "блокировок», антивирус с проверкой HTTPS, записи в файле hosts.\n\n"
+            "5. Если вход или скачивание не работает — «Проверить связь с Apple» в меню «⋯» вверху справа. "
+            "Частые причины: DNS «для обхода блокировок», антивирус с проверкой HTTPS, записи в файле hosts.\n\n"
             f"Скачанные .ipa хранятся в папке {core.OUT_DIR} и повторно не скачиваются.\n\n"
             f"Версия {core.__version__}. Компоненты: " + self.tool_status())
+
+    # ---------- настройки ----------
+    @Slot()
+    def openSettings(self):
+        self.refresh_ipa()  # «Загрузки»: сколько места занимают файлы
+
+    @Slot()
+    def chooseIpaDir(self):
+        self.choose_ipa_dir()
+
+    @Slot()
+    def resetIpaDir(self):
+        self.set_ipa_dir(self.default_out)
+
+    @Slot()
+    def clearIpa(self):
+        self.clear_ipa()
+
+    @Slot()
+    def checkUpdates(self):
+        self.check_updates()
 
     # ---------- панель приложения ----------
     @Slot(str, int)
@@ -536,5 +610,6 @@ class Backend(QObject, TasksMixin, DetailMixin):
         self.icons.stop()
         if self.detail is not None:
             self.detail["alive"] = False
+        close_procs()  # иначе ipatool и установщик продолжили бы работать без окна; новых не запускаем
         self.wipe_session()
         storage.forget_email()

@@ -11,8 +11,13 @@ ApplicationWindow {
     title: "Restore " + backend.version + " — возврат приложений на iPhone"
     color: P.bg
     font.family: P.font
+    // стандартные элементы Qt (меню «⋯», подсказки, индикатор загрузки) — тоже в цветах темы
+    palette.window: P.card; palette.windowText: P.text; palette.base: P.field; palette.text: P.text
+    palette.button: P.second; palette.buttonText: P.text; palette.highlight: P.accent; palette.highlightedText: "white"
+    palette.light: P.card; palette.mid: P.border; palette.dark: P.muted; palette.placeholderText: P.muted
+    palette.toolTipBase: P.card; palette.toolTipText: P.text
 
-    RowLayout {
+    ColumnLayout {
         anchors.fill: parent
         spacing: 0
         // пока открыта панель приложения или всплывающее окно, окно под ними нажатий не получает: иначе
@@ -20,9 +25,8 @@ ApplicationWindow {
         // нажатия к тому, что под ним, — TapHandler их не «съедает»)
         enabled: !detail.visible && !dialogs.anyOpen
 
-        Sidebar {
-            Layout.fillHeight: true
-            Layout.preferredWidth: 236
+        TopBar {
+            Layout.fillWidth: true
             onHelpRequested: dialogs.openHelp()
             onSettingsRequested: dialogs.openSettings()
             onSupportRequested: dialogs.openSupport()
@@ -53,12 +57,12 @@ ApplicationWindow {
                 Layout.preferredHeight: backend.selectedCount > 0 ? 62 : 0
                 visible: Layout.preferredHeight > 0
                 clip: true
-                radius: 16; color: P.card; border.color: P.accentDim
+                radius: 31; color: P.accentSoft; border.color: P.accentDim
                 Behavior on Layout.preferredHeight { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 RowLayout {
                     anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 12
                     Text { text: backend.selectedText; color: P.text; font.family: P.font; font.pixelSize: 14
-                           font.bold: true; Layout.fillWidth: true }
+                           font.weight: Font.Bold; Layout.fillWidth: true }
                     Btn { text: "Снять"; kind: "ghost"; lock: false; onClicked: backend.clearSelection() }
                     Btn { text: "Поставить выбранные"; kind: "primary"; onClicked: backend.installSelected() }
                 }
@@ -69,7 +73,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.leftMargin: 28; Layout.rightMargin: 28; Layout.topMargin: 6; Layout.bottomMargin: 8
                 spacing: 10
-                Text { text: backend.status; color: P.muted; font.family: P.font; font.pixelSize: 12
+                Text { textFormat: Text.PlainText; text: backend.status; color: P.muted; font.family: P.font; font.pixelSize: 12
                        elide: Text.ElideRight; Layout.fillWidth: true }
                 ProgressBar {
                     visible: backend.busy
@@ -79,10 +83,14 @@ ApplicationWindow {
                     contentItem: Item {
                         clip: true
                         Rectangle {
+                            id: runner
                             width: parent.width * 0.35; height: parent.height; radius: 2; color: P.accent
-                            SequentialAnimation on x {
-                                running: backend.busy; loops: Animation.Infinite
-                                NumberAnimation { from: -50; to: 160; duration: 1100; easing.type: Easing.InOutQuad }
+                            // Animator идёт в потоке отрисовки: полоса движется ровно, даже когда поток окна
+                            // занят (обновление списков, журнал). Иначе кадры шли неровно — на мониторе с
+                            // G-SYNC/FreeSync частота обновления прыгала вслед за ними и экран мерцал.
+                            XAnimator {
+                                target: runner; running: backend.busy; loops: Animation.Infinite
+                                from: -50; to: 160; duration: 1100; easing.type: Easing.InOutQuad
                             }
                         }
                     }
@@ -106,10 +114,10 @@ ApplicationWindow {
                     id: logScroll
                     anchors.fill: parent; anchors.margins: 6
                     TextArea {
-                        id: logText
+                        id: logText; textFormat: TextEdit.PlainText
                         readOnly: true; selectByMouse: true
                         wrapMode: TextEdit.Wrap
-                        color: "#c9c9d3"; selectionColor: P.accent
+                        color: P.logText; selectionColor: P.accentDim
                         font.family: "Consolas"; font.pixelSize: 12
                         background: null
                     }
@@ -131,5 +139,7 @@ ApplicationWindow {
             }
             logText.cursorPosition = logText.length
         }
+        // долгая операция закончилась, а окно не на переднем плане — мигнуть значком на панели задач
+        function onTaskFinished() { if (!win.active) win.alert(0) }
     }
 }

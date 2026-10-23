@@ -3,11 +3,15 @@
 клик по копии в панели приложения открывал плитку главной под панелью, клик по галочке открывал приложение.)"""
 import os
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sandbox  # noqa: E402 — до restore_apps: тесты не трогают настоящие данные программы
+assert sandbox.ROOT
 os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
 
 from PySide6.QtQuick import QQuickWindow  # noqa: E402 — с этим импортом окно приходит как QQuickWindow
@@ -16,6 +20,11 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from restore_gui import app as gui  # noqa: E402
+from restore_gui import storage  # noqa: E402
+
+# настройки тестового окна — во временную папку, а не в settings.json пользователя
+_SETTINGS_DIR = tempfile.TemporaryDirectory()
+storage.SETTINGS = Path(_SETTINGS_DIR.name) / "settings.json"
 
 SBER = 492224193
 
