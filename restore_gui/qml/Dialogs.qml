@@ -1,12 +1,13 @@
-// Все всплывающие окна: вход, код 2FA, справка, настройки, поддержка, сообщения.
+// Все всплывающие окна: вход, код 2FA, справка, настройки, поддержка, сообщения, новая версия.
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
 Item {
     id: dialogs
-    readonly property bool anyOpen: login.visible || ask.visible || help.visible || settings.visible
-                                    || support.visible || noticeBox.visible
+    readonly property bool othersOpen: login.visible || ask.visible || help.visible || settings.visible
+                                       || support.visible || noticeBox.visible
+    readonly property bool anyOpen: othersOpen || update.visible
     function openHelp() { helpText.text = backend.helpText(); help.open() }
     function openSettings() { settings.open() }
     function openSupport() { copyBtn.text = "Скопировать ссылку"; support.open() }
@@ -107,11 +108,55 @@ Item {
         Btn { text: "OK"; lock: false; kind: "primary"; Layout.alignment: Qt.AlignRight; onClicked: noticeBox.close() }
     }
 
+    // ---------- доступна новая версия (автопроверка при запуске, prefs.py) ----------
+    Modal {
+        id: update
+        title: "Доступна новая версия"
+        width: 520
+        onClosed: if (backend.updateOpen) backend.answerUpdate("later")  // Esc или нажатие мимо окна — «Позже»
+        Text { textFormat: Text.PlainText; text: "Restore " + backend.updateVersion + " · у вас " + backend.version
+               color: P.muted; font.family: P.font; font.pixelSize: 13; Layout.fillWidth: true; Layout.topMargin: -6 }
+        Text { text: "Что нового"; visible: backend.updateNotes !== ""; color: P.text; font.family: P.font
+               font.pixelSize: 14; font.weight: Font.Bold; Layout.topMargin: 4 }
+        Rectangle {
+            visible: backend.updateNotes !== ""
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.min(notes.implicitHeight + 24, 280)
+            radius: 12; color: P.rail; border.color: P.border
+            Flickable {
+                id: notesScroll
+                anchors.fill: parent; anchors.margins: 12
+                contentHeight: notes.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ThinScrollBar {}
+                // текст из сети — только обычным текстом: без разметки и кликабельных ссылок
+                Text { id: notes; width: notesScroll.width - 10; textFormat: Text.PlainText; text: backend.updateNotes
+                       color: P.text; font.family: P.font; font.pixelSize: 13; wrapMode: Text.WordWrap; lineHeight: 1.15 }
+            }
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.topMargin: 4
+            Btn { text: "Пропустить эту версию"; kind: "ghost"; lock: false; onClicked: backend.answerUpdate("skip") }
+            Item { Layout.fillWidth: true }
+            Btn { text: "Позже"; kind: "ghost"; lock: false; onClicked: backend.answerUpdate("later") }
+            Btn { text: "Скачать"; kind: "primary"; lock: false; onClicked: backend.answerUpdate("download") }
+        }
+    }
+    // окно новой версии ждёт, пока закончится операция и закроются вход, код 2FA и другие окна
+    Timer {
+        interval: 500; repeat: true
+        running: backend.updateOpen && !update.visible
+        onTriggered: if (!dialogs.othersOpen && !backend.busy) update.open()
+    }
+
     // открываются по свойствам Backend (а не привязкой visible: её рвёт закрытие по Esc)
     Connections {
         target: backend
         function onNoticeRequested(title, text) { dialogs.notice(title, text) }
         function onLoginOpenChanged() { backend.loginOpen ? login.open() : login.close() }
         function onAskOpenChanged() { backend.askOpen ? ask.open() : ask.close() }
+        function onUpdateOpenChanged() { if (!backend.updateOpen) update.close() }
     }
 }

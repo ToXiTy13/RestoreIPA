@@ -1,7 +1,9 @@
 """Оформление: светлая и тёмная палитры, цвет акцента на выбор и шрифт Manrope (restore_gui/fonts, лицензия OFL).
 QML получает палитру словарём (palette(), в QML — P): цвета задаются только здесь."""
+import sys
 
 FONT = "Manrope"
+MONO = "Menlo" if sys.platform == "darwin" else "Consolas"  # журнал: моноширинный шрифт, который есть в системе
 AVATARS = ("#6d5dfc", "#3b82f6", "#10b981", "#f97316", "#ec4899", "#22c55e", "#0ea5e9", "#eab308")
 
 VERSIONS_PAGE = 15  # версий в панели за раз: для каждой видимой версии номер и дату спрашиваем у Apple
@@ -82,7 +84,7 @@ DEFAULT_ACCENT = "emerald"
 def palette(dark=False, accent=DEFAULT_ACCENT):
     """Палитра для QML: поверхности и текст по теме + цвета выбранного акцента."""
     name, light_acc, dark_acc = ACCENTS.get(accent, ACCENTS[DEFAULT_ACCENT])
-    return {"font": FONT, "dark": dark, **(DARK if dark else LIGHT), **(dark_acc if dark else light_acc)}
+    return {"font": FONT, "mono": MONO, "dark": dark, **(DARK if dark else LIGHT), **(dark_acc if dark else light_acc)}
 
 
 QML = palette()  # светлая с изумрудным акцентом — для скриптов и проверок, которым не нужен выбор

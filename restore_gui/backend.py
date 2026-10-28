@@ -24,7 +24,7 @@ from .catalog import Catalog, parse_app_ref, plural, split_disguise
 from .detail import DetailMixin
 from .icons import IconLoader, cached
 from .models import RowsModel
-from .prefs import NOTIFY_AFTER_S, REPO_URL, PrefsMixin
+from .prefs import NOTIFY_AFTER_S, REPO_URL, UPDATE_DELAY_MS, PrefsMixin
 from .tasks import TasksMixin
 
 # страница CloudTips для «Поддержать разработчика»; пустая строка — кнопка не показывается.
@@ -63,6 +63,7 @@ class Backend(QObject, TasksMixin, DetailMixin, PrefsMixin):
         # настройки (prefs.py)
         "themeMode": "system", "accentName": "emerald", "ipaDir": "", "deleteAfterInstall": False,
         "notifyDone": True, "ipaSummary": "", "updateText": "", "updateUrl": "",
+        "autoUpdate": True, "skipVersion": "", "updateOpen": False, "updateVersion": "", "updateNotes": "",
     }
     pageChanged, page = qprop(str, "page")
     loggedInChanged, loggedIn = qprop(bool, "loggedIn")
@@ -103,6 +104,11 @@ class Backend(QObject, TasksMixin, DetailMixin, PrefsMixin):
     ipaSummaryChanged, ipaSummary = qprop(str, "ipaSummary")
     updateTextChanged, updateText = qprop(str, "updateText")
     updateUrlChanged, updateUrl = qprop(str, "updateUrl")
+    autoUpdateChanged, autoUpdate = qprop(bool, "autoUpdate")  # проверять обновления при запуске
+    skipVersionChanged, skipVersion = qprop(str, "skipVersion")  # «Пропустить эту версию» в окне обновления
+    updateOpenChanged, updateOpen = qprop(bool, "updateOpen")
+    updateVersionChanged, updateVersion = qprop(str, "updateVersion")
+    updateNotesChanged, updateNotes = qprop(str, "updateNotes")
 
     logAppended = Signal(str)
     noticeRequested = Signal(str, str)  # заголовок, текст
@@ -171,6 +177,7 @@ class Backend(QObject, TasksMixin, DetailMixin, PrefsMixin):
                                          for fn in (self._prepare_engine, self.watch_device,
                                                     storage.remove_stale_unpacked)])
         QTimer.singleShot(1500, lambda: self.icons.start(a["id"] for a in self.catalog.apps))
+        QTimer.singleShot(UPDATE_DELAY_MS, self.auto_check_updates)
 
     def task_wipe_old(self):
         if self.wipe_session():
@@ -579,6 +586,10 @@ class Backend(QObject, TasksMixin, DetailMixin, PrefsMixin):
     @Slot()
     def checkUpdates(self):
         self.check_updates()
+
+    @Slot(str)
+    def answerUpdate(self, action):
+        self.answer_update(action)
 
     # ---------- панель приложения ----------
     @Slot(str, int)

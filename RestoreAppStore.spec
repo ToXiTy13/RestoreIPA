@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Сборка: build.ps1 (он же скачивает и проверяет ресурсы в build/res).
+# Сборка: build.ps1 на Windows, build_mac.sh на macOS (они же скачивают и проверяют ресурсы в build/res).
 # Каталог и иконка — из репозитория; ipatool.exe, libunicorn.dll и лицензия Unicorn — из build\res.
 # Всё кладётся в корень ресурсов (core.BUNDLE).
 # Два варианта (RESTORE_ONEDIR):

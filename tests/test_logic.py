@@ -310,6 +310,33 @@ class ToolLookup(unittest.TestCase):
                 os.chdir(old)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "только на macOS")
+class MacOnly(unittest.TestCase):
+    def test_ipatool_home_sees_user_keychain(self):
+        """С подменённым HOME macOS ищет «Связку ключей» в HOME/Library/Keychains — там ссылка на настоящую;
+        удаление копии сессии удаляет ссылку, а не связку ключей (sandbox: «настоящая» — во временной папке)."""
+        core.USER_KEYCHAINS.mkdir(parents=True, exist_ok=True)
+        (core.USER_KEYCHAINS / "login.keychain-db").write_bytes(b"")
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "w0"
+            env = core.ipatool_env(home)
+            link = home / "Library" / "Keychains"
+            self.assertEqual(env["HOME"], str(home))
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), core.USER_KEYCHAINS.resolve())
+            core.ipatool_env(home)  # повторный вызов ничего не ломает
+            self.assertTrue(link.is_symlink())
+            shutil.rmtree(home)
+        self.assertTrue((core.USER_KEYCHAINS / "login.keychain-db").is_file())
+
+    def test_https_has_ca_bundle(self):
+        """Python на macOS не видит системные сертификаты: без SSL_CERT_FILE падали бы иконки и проверки."""
+        import ssl
+        path = Path(os.environ.get("SSL_CERT_FILE", ""))
+        self.assertTrue(path.is_file(), f"нет набора сертификатов: {path}")
+        self.assertGreater(ssl.create_default_context().cert_store_stats()["x509_ca"], 0)
+
+
 def lookup_answer(body):
     """Подмена urlopen: ответ iTunes Lookup с телом body."""
     return lambda *_a, **_k: contextlib.nullcontext(io.BytesIO(body))
@@ -357,6 +384,23 @@ class IconSource(unittest.TestCase):
             finally:
                 loader.stop()
                 icons.ICONS = old
+
+
+class ReleaseNotes(unittest.TestCase):
+    def test_notes_plain_text_until_downloads(self):
+        """«Что нового» в окне обновления: начало описания релиза без разметки; файлы, хеши и ссылки — нет."""
+        from restore_gui.prefs import release_notes
+        body = ("Новый дизайн и **тёмная** тема.\r\n\r\n![Главный экран](https://example.com/home.png)\r\n\r\n"
+                "## Исправления\r\n\r\n- Кнопка `Остановить` работает\r\n* Подробнее — в [README](https://evil.example.com)"
+                "\r\n<img src=x onerror=alert(1)>\r\n\r\n\r\n\r\n## Что скачать\r\n\r\n| Файл | Что это |\r\n"
+                "```\r\n57feb7  RestoreSetup.exe\r\n```")
+        self.assertEqual(release_notes(body), "Новый дизайн и тёмная тема.\n\nИсправления\n\n"
+                                              "• Кнопка Остановить работает\n• Подробнее — в README")
+        self.assertEqual(release_notes(None), "")
+        self.assertEqual(release_notes("Коротко.\n\n## Что нового\n\n- пункт"), "Коротко.\n\n• пункт")
+        long = release_notes("\n".join(f"- пункт {i}" for i in range(1000)), limit=100)
+        self.assertLessEqual(len(long), 102)
+        self.assertTrue(long.endswith("\n…"))
 
 
 class ConsoleLogin(unittest.TestCase):

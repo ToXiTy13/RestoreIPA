@@ -129,7 +129,7 @@ Drawer {
                                 Layout.fillWidth: true
                                 textFormat: TextEdit.PlainText; text: backend.detailAnswer
                                 readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
-                                color: P.text; font.family: "Consolas"; font.pixelSize: 11
+                                color: P.text; font.family: P.mono; font.pixelSize: 11
                                 background: Rectangle { radius: 8; color: P.field }
                             }
                             Btn { text: "Повторить проверку"; lock: false; implicitHeight: 34; onClicked: backend.detailRecheck() }

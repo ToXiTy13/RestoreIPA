@@ -1,5 +1,7 @@
 """Окно загружается без ошибок QML и основные действия не падают. Без сети, Apple ID и показа окна.
 python -m unittest discover tests"""
+import io
+import json
 import os
 import sys
 import tempfile
@@ -40,6 +42,11 @@ class Window(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         qInstallMessageHandler(None)
+        # окно — раньше backend: иначе при выходе из Python QML пересчитывает привязки к уже удалённому backend
+        # и сыплет «TypeError: Cannot read property … of null»
+        import shiboken6
+        shiboken6.delete(cls.engine)
+        del cls.engine
 
     def pump(self):
         for _ in range(5):
@@ -175,7 +182,8 @@ class Window(unittest.TestCase):
             gui.qt_environment()
             self.assertEqual(os.environ["QT_D3D_NO_FLIP"], "1")
             self.assertNotIn("QML_DISABLE_DISK_CACHE", os.environ, "кэш QML отключён у установленной версии")
-            with mock.patch.object(sys, "_MEIPASS", r"C:\Temp\_MEI12345", create=True):
+            # путь в формате текущей системы: на macOS «\» не разделитель, и имя папки не начиналось бы с _MEI
+            with mock.patch.object(sys, "_MEIPASS", str(Path(tempfile.gettempdir()) / "_MEI12345"), create=True):
                 gui.qt_environment()
             self.assertEqual(os.environ["QML_DISABLE_DISK_CACHE"], "1")
             os.environ["QT_D3D_NO_FLIP"] = "0"
@@ -195,6 +203,63 @@ class Window(unittest.TestCase):
                         "https://evil.example.com", b.repoUrl + ".evil.com", "file:///C:/Windows/notepad.exe"):
                 b.openUrl(url)
         self.assertEqual(opened, [b.supportUrl, b.repoUrl, b.repoUrl + "/releases/tag/v9.9.9"])
+
+    def test_update_window_only_for_newer_not_skipped_version(self):
+        """Автопроверка при запуске: окно — только если на GitHub версия новее и её не пропустили; иначе молча."""
+        from unittest import mock
+
+        from restore_gui import prefs
+        b = self.backend
+        rel = {"tag_name": "v99.0.0", "html_url": b.repoUrl + "/releases/tag/v99.0.0",
+               "body": "Что-то новое.\n\n## Что скачать\n| файлы |"}
+
+        class Sync:  # поток проверки — сразу, чтобы проверить результат без ожидания
+            def __init__(self, target, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        def answer(data):
+            resp = mock.MagicMock()
+            resp.__enter__.return_value = io.BytesIO(json.dumps(data).encode())
+            return lambda req, timeout: resp
+
+        saved = (b.post, b.autoUpdate, b.skipVersion, b.updateOpen)
+        b.post = lambda fn: fn()
+        try:
+            with mock.patch.object(prefs.threading, "Thread", Sync):
+                for data, auto, skip, expected in (
+                        (rel, True, "", True),                                     # новее — окно
+                        (dict(rel, tag_name=f"v{b.version}"), True, "", False),    # та же версия — молча
+                        (dict(rel, tag_name="v0.9"), True, "", False),             # старее — молча
+                        (rel, True, "99.0.0", False),                              # пропущена — молча
+                        (rel, False, "", False),                                   # автопроверка выключена
+                        (dict(rel, tag_name="latest"), True, "", False)):          # непонятный тег — молча
+                    b.autoUpdate, b.skipVersion, b.updateOpen = auto, skip, False
+                    with mock.patch.object(prefs.urllib.request, "urlopen", side_effect=answer(data)):
+                        b.auto_check_updates()
+                    self.assertEqual(b.updateOpen, expected, f"{data['tag_name']}, авто {auto}, пропуск {skip!r}")
+                b.updateOpen = False
+                with mock.patch.object(prefs.urllib.request, "urlopen", side_effect=OSError("нет сети")):
+                    b.auto_check_updates()  # без сети — без окна и без ошибки
+                self.assertFalse(b.updateOpen)
+                self.assertEqual(b.updateNotes, "Что-то новое.")
+                self.assertEqual(b.updateVersion, "99.0.0")
+
+            opened = []
+            b.openUrl = lambda url: opened.append(url)
+            try:
+                b.updateOpen = True
+                b.answerUpdate("download")
+                self.assertEqual(opened, [b.repoUrl + "/releases/tag/v99.0.0"])
+                b.updateOpen = True
+                b.answerUpdate("skip")
+                self.assertEqual((b.skipVersion, b.updateOpen), ("99.0.0", False))
+            finally:
+                del b.openUrl
+        finally:
+            b.post, b.autoUpdate, b.skipVersion, b.updateOpen = saved
 
     def test_file_dialog_leaves_registry_as_it_was(self):
         """ask_file оборачивает QFileDialog в storage.registry_untouched: Qt пишет туда последнюю папку."""

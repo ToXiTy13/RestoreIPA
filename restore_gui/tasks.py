@@ -2,6 +2,7 @@
 (выполнить fn в главном потоке) и self.set_status; вопросы человеку — ask_yes_no / ask_file / show_notice
 (их даёт Backend)."""
 import contextlib
+import importlib.util
 import ipaddress
 import re
 import shutil
@@ -123,6 +124,10 @@ class TasksMixin:
     def find_installer(self, ask=True):
         if core.FROZEN:  # pymobiledevice3 встроен в этот же exe (режим --pmd)
             return "builtin", [sys.executable, "--pmd"]
+        # из исходников — тот же режим --pmd, если pymobiledevice3 стоит в этом Python: команды pymobiledevice3
+        # в PATH нет, пока venv не активирован, а --pmd ещё и держит его папку в папке программы (own_pmd_folder)
+        if importlib.util.find_spec("pymobiledevice3"):
+            return "builtin", [sys.executable, str(core.HERE / "restore_apps_gui.py"), "--pmd"]
         for name in ("pymobiledevice3", "ideviceinstaller"):
             p = self.find_tool(name, "", ask=False)
             if p:
@@ -140,7 +145,8 @@ class TasksMixin:
         text = f"ipatool {mark('ipatool')}{' (встроен)' if bundled('ipatool') else ''}   "
         if core.FROZEN:
             return text + "установщик ✓ (встроен)"
-        return text + f"pymobiledevice3 {mark('pymobiledevice3')}   ideviceinstaller {mark('ideviceinstaller')}"
+        pmd = "✓" if importlib.util.find_spec("pymobiledevice3") else mark("pymobiledevice3")  # см. find_installer
+        return text + f"pymobiledevice3 {pmd}   ideviceinstaller {mark('ideviceinstaller')}"
 
     def stream(self, cmd, quiet_json=False):
         """Запуск с построчным журналом. ipatool работает с основной сессией — под self.dlock, как и dq:

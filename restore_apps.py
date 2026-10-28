@@ -43,6 +43,15 @@ if sys.platform.startswith("win"):
     # иначе Windows (и shutil.which) ищет ipatool.exe сначала в текущей папке, и подложенный там файл
     # получил бы пароль Apple ID; влияет и на поиск программ дочерними процессами
     os.environ.setdefault("NoDefaultCurrentDirectoryInExePath", "1")
+elif sys.platform == "darwin":
+    # Python с python.org (и собранный из него .app) на macOS не видит системные сертификаты: любой HTTPS-запрос
+    # (иконки, iTunes Lookup, обновления) падает с CERTIFICATE_VERIFY_FAILED. Берём набор Mozilla из certifi
+    # (приходит с requests). ipatool написан на Go и сертификаты берёт из системы — его это не касается
+    try:
+        import certifi
+        os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+    except ImportError:
+        pass
 
 FROZEN = getattr(sys, "frozen", False)  # собран PyInstaller'ом
 BUNDLE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))  # встроенные ресурсы
@@ -50,7 +59,7 @@ HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resol
 _CSV = "removed_ru_appstore_app_ids.csv"
 # CSV рядом с программой имеет приоритет над встроенным: его можно править
 CATALOG = HERE / _CSV if (HERE / _CSV).exists() else BUNDLE / _CSV
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 APP_NAME = "Restore"
 
 
@@ -80,6 +89,7 @@ IPATOOL_HOME = DATA_DIR / "ipatool-home"
 # кэш ipatool (Unicorn, служебные файлы Apple для входа). Go кладёт его в os.UserCacheDir()/ipatool, а
 # ipatool_env() подставляет вместо него DATA_DIR: выходит DATA_DIR\ipatool, а не %LOCALAPPDATA%\ipatool
 IPATOOL_CACHE = (IPATOOL_HOME / "Library" / "Caches" if sys.platform == "darwin" else DATA_DIR) / "ipatool"
+USER_KEYCHAINS = Path.home() / "Library" / "Keychains"  # macOS: настоящая «Связка ключей», см. _link_keychains
 # .ipa: у портативной версии — в папке «ipa» рядом с exe (появляется при первом скачивании), у установленной,
 # на Mac и если рядом с exe писать нельзя — в «Документы\\Restore\\ipa».
 # installed.txt кладёт установщик; программа для macOS (.app) всегда «установленная»: внутрь .app писать нельзя
@@ -149,9 +159,28 @@ def ipatool_env(home=None):
     из HOMEDRIVE+HOMEPATH) и свой кэш IPATOOL_CACHE (Go ищет его в %LOCALAPPDATA%, на Linux — в XDG_CACHE_HOME)."""
     home = Path(home or IPATOOL_HOME)
     home.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        _link_keychains(home)
     drive, rest = os.path.splitdrive(str(home))
     return dict(os.environ, HOME=str(home), USERPROFILE=str(home), HOMEDRIVE=drive, HOMEPATH=rest or "\\",
                 LOCALAPPDATA=str(DATA_DIR), XDG_CACHE_HOME=str(DATA_DIR))
+
+
+def _link_keychains(home):
+    """macOS: ссылка home/Library/Keychains на «Связку ключей» пользователя.
+
+    ipatool на macOS хранит сессию в «Связке ключей», а система ищет её в $HOME/Library/Keychains. С подменённым
+    HOME она её не находит и показывает окно «Связка ключей не найдена». Сессию удаляет `ipatool auth revoke`
+    (выход, закрытие программы, следующий запуск); shutil.rmtree удаляет саму ссылку, не заходя по ней.
+    """
+    link = home / "Library" / "Keychains"
+    if link.is_symlink() or link.exists():
+        return
+    try:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(USER_KEYCHAINS, target_is_directory=True)
+    except OSError:
+        pass
 
 
 def is_ipatool(cmd):
