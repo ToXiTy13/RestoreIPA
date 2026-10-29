@@ -4,7 +4,8 @@
   powershell -ExecutionPolicy Bypass -File build.ps1                 # exe + установщик
   powershell -ExecutionPolicy Bypass -File build.ps1 -SkipInstaller  # только exe
 
-Нужно: Python 3.12 (py install 3.12), для установщика — Inno Setup 6.
+Нужно: Python 3.12 (python.org, winget install Python.Python.3.12 или py install 3.12; другой путь — переменная
+PYTHON), для установщика — Inno Setup 6.
 ipatool и Unicorn скачиваются из официальных релизов на GitHub; сборка останавливается, если не совпал SHA-256.
 #>
 param([switch]$SkipInstaller)
@@ -37,11 +38,39 @@ function Invoke-Native {
     if ($LASTEXITCODE) { throw "Команда завершилась с кодом ${LASTEXITCODE}: $($args -join ' ')" }
 }
 
+function Find-Python312 {
+    # Python 3.12, которым создаётся build\venv: переменная PYTHON, лаунчер py (его нет у Python из Microsoft Store
+    # и при установке без «py launcher»), python3.12 / python в PATH, обычные папки установки python.org и winget
+    $candidates = @()
+    if ($env:PYTHON) { $candidates += , @($env:PYTHON) }
+    if (Get-Command py -ErrorAction SilentlyContinue) { $candidates += , @("py", "-V:3.12"); $candidates += , @("py", "-3.12") }
+    foreach ($name in "python3.12", "python") {
+        Get-Command $name -All -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch "WindowsApps" } |
+            ForEach-Object { $candidates += , @($_.Source) }
+    }
+    foreach ($dir in "$env:LOCALAPPDATA\Programs\Python\Python312", "$env:ProgramFiles\Python312",
+                     "$env:LOCALAPPDATA\Python\pythoncore-3.12-64") {
+        if (Test-Path "$dir\python.exe") { $candidates += , @("$dir\python.exe") }
+    }
+    foreach ($c in $candidates) {
+        $exe, $pre = $c[0], @($c | Select-Object -Skip 1)
+        try {  # нет такой версии или программы: py пишет в stderr, а при ErrorActionPreference=Stop это исключение
+            $ver = & $exe @pre -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+            if ($LASTEXITCODE -eq 0 -and "$ver".Trim() -eq "3.12") { return , $c }
+        } catch {}
+    }
+    throw ("Не найден Python 3.12. Установите его одним из способов и запустите сборку заново:`n" +
+           "  winget install Python.Python.3.12`n" +
+           "  или установщик с https://www.python.org/downloads/ (версия 3.12.x)`n" +
+           "Если Python 3.12 уже стоит в другом месте, укажите путь:  `$env:PYTHON = 'C:\путь\к\python.exe'")
+}
+
 # --- окружение сборки ---
 $py = "build\venv\Scripts\python.exe"
 if (-not (Test-Path $py)) {
-    Write-Host "Создаю build\venv (Python 3.12)"
-    Invoke-Native py -V:3.12 -m venv build\venv
+    $base = Find-Python312
+    Write-Host "Создаю build\venv (Python 3.12: $($base -join ' '))"
+    Invoke-Native @base -m venv build\venv
 }
 Invoke-Native $py -m pip install --disable-pip-version-check -q -r requirements-build.txt
 

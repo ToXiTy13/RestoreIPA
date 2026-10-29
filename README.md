@@ -133,7 +133,7 @@ py -V:3.12 -m pip install PySide6 pymobiledevice3 segno
 py -V:3.12 restore_apps_gui.py
 ```
 
-На Mac — то же самое через `python3.12` вместо `py -V:3.12`.
+На Mac — то же самое через `python3.12` вместо `py -V:3.12`. Если на Windows нет команды `py` (Python Launcher), используйте полный путь к `python.exe` версии 3.12.
 
 Есть и консольная версия:
 
@@ -181,6 +181,8 @@ py -V:3.12 -m unittest discover tests
 ```bash
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
+
+Нужен Python 3.12: с [python.org](https://www.python.org/downloads/), `winget install Python.Python.3.12` или `py install 3.12`. Скрипт находит его сам — через `py`, в `PATH` или в обычной папке установки; другой путь можно указать переменной `PYTHON` (`$env:PYTHON = 'C:\путь\к\python.exe'`). Для установщика нужен [Inno Setup 6](https://jrsoftware.org/isinfo.php), без него — флаг `-SkipInstaller`.
 
 Скрипт создаёт окружение `build\venv` (Python 3.12, версии из `requirements-build.txt`), скачивает ipatool 2.7.0 и Unicorn 2.1.4 из официальных релизов **со сверкой SHA-256** и прогоняет тесты. Затем собирает (PyInstaller):
 - `dist\RestoreAppStore.exe` — портативная версия одним файлом;
