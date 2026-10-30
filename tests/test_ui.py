@@ -190,6 +190,51 @@ class Window(unittest.TestCase):
             gui.qt_environment()
             self.assertEqual(os.environ["QT_D3D_NO_FLIP"], "0")
 
+    def test_clear_moves_only_files_downloaded_by_program(self):
+        """«Очистить…» переносит в Корзину только .ipa программы (…_<App ID>[_v<версия>].ipa), другие — не трогает."""
+        from unittest import mock
+
+        import restore_apps as core
+        from restore_gui import prefs
+        b = self.backend
+        with tempfile.TemporaryDirectory() as d:
+            names = ("СберБанк_492224193.ipa", "Альфа_353127685_v850.ipa", "my-backup.ipa", "Game_12.ipa")
+            for n in names:
+                (Path(d) / n).write_bytes(b"x")
+            trashed, asked = [], []
+            old = core.OUT_DIR
+            core.OUT_DIR = Path(d)
+            try:
+                with mock.patch.object(prefs.QFile, "moveToTrash", lambda p: trashed.append(Path(p).name) or True), \
+                        mock.patch.object(b, "ask_yes_no", lambda t, x: asked.append(x) or True):
+                    b.clear_ipa()
+            finally:
+                core.OUT_DIR = old
+        self.assertEqual(sorted(trashed), sorted(names[:2]))
+        self.assertIn("2 файла", asked[0])
+
+    def test_changed_bundled_ipatool_is_not_used(self):
+        """Встроенный ipatool, не совпадающий с официальным, программа не запускает и сообщает об этом."""
+        from unittest import mock
+
+        import restore_apps as core
+        from restore_gui import tasks
+        b = self.backend
+        with tempfile.TemporaryDirectory() as d:
+            tool = str(Path(d) / "ipatool.exe")
+            Path(tool).write_bytes(b"")
+            notices = []
+            with mock.patch.object(core, "FROZEN", True), mock.patch.object(tasks, "bundled", lambda name: tool), \
+                    mock.patch.object(tasks.shutil, "which", lambda name: None), \
+                    mock.patch.object(b, "show_notice", lambda t, x: notices.append(t)):
+                with mock.patch.object(tasks, "ipatool_genuine", lambda p: False):
+                    self.assertIsNone(b.find_tool("ipatool", "", ask=True))
+                    self.assertEqual(notices, ["ipatool изменён"])
+                with mock.patch.object(tasks, "ipatool_genuine", lambda p: True):
+                    self.assertEqual(b.find_tool("ipatool", "", ask=False), tool)
+                with mock.patch.object(tasks, "ipatool_genuine", lambda p: None):  # хеша для системы нет
+                    self.assertEqual(b.find_tool("ipatool", "", ask=False), tool)
+
     def test_open_url_only_known_links(self):
         """Окно открывает в браузере только ссылки программы: донат и страницу/релизы на GitHub."""
         from unittest import mock

@@ -21,6 +21,7 @@ REPO_URL = f"https://github.com/{REPO}"
 NOTIFY_AFTER_S = 5  # мигать значком на панели задач, только если операция шла дольше
 UPDATE_DELAY_MS = 3000  # автопроверка обновлений — чуть позже запуска, когда окно уже нарисовано
 NOTES_LIMIT = 2000  # «Что нового» в окне обновления: столько символов из описания релиза, не больше
+OWN_IPA = re.compile(r"_\d{6,12}(_v\d+)?\.ipa$")  # имя .ipa, скачанного программой (tasks.task_download)
 # что из свойств Backend сохраняется между запусками, и проверка значения из файла
 SAVED = {
     "themeMode": lambda v: v in ("system", "light", "dark"),
@@ -118,14 +119,15 @@ class PrefsMixin:
         return sorted(core.OUT_DIR.glob("*.ipa"), key=lambda p: p.stat().st_mtime, reverse=True) \
             if core.OUT_DIR.exists() else []
 
-    def update_ipa_summary(self, files):
-        if not files:
-            self.ipaSummary = "Скачанных файлов нет"
-            return
+    @staticmethod
+    def files_summary(files):
         size = sum(p.stat().st_size for p in files) / 1024 ** 3
         n = len(files)
-        self.ipaSummary = f"{n} {plural(n, 'файл', 'файла', 'файлов')} · " + \
+        return f"{n} {plural(n, 'файл', 'файла', 'файлов')} · " + \
             (f"{size:.1f} ГБ".replace(".", ",") if size >= 0.1 else f"{size * 1024:.0f} МБ")
+
+    def update_ipa_summary(self, files):
+        self.ipaSummary = self.files_summary(files) if files else "Скачанных файлов нет"
 
     def choose_ipa_dir(self):
         with storage.registry_untouched():  # QFileDialog запоминает папку в реестре — см. registry_untouched
@@ -143,12 +145,15 @@ class PrefsMixin:
         self.log(f"Скачанные .ipa теперь сохраняются в {path}")
 
     def clear_ipa(self):
-        files = self.ipa_files()
+        # только файлы, скачанные программой (имя …_<App ID>[_v<версия>].ipa): другие .ipa в папке не трогаем
+        files = [p for p in self.ipa_files() if OWN_IPA.search(p.name)]
         if not files:
+            self.show_notice("Скачанные файлы", "В папке загрузок нет .ipa, скачанных программой.")
             return
-        if not self.ask_yes_no("Скачанные файлы", f"Переместить в корзину все скачанные .ipa ({self._ipaSummary})?\n\n"
-                                                  "Приложения на iPhone это не затронет; нужную версию можно будет "
-                                                  "скачать заново."):
+        if not self.ask_yes_no("Скачанные файлы", f"Переместить в корзину .ipa, скачанные программой "
+                                                  f"({self.files_summary(files)})?\n\n"
+                                                  "Другие файлы в папке останутся. Приложения на iPhone это не "
+                                                  "затронет; нужную версию можно будет скачать заново."):
             return
         left = [p for p in files if not QFile.moveToTrash(str(p))]
         self.refresh_ipa()

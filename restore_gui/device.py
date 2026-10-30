@@ -58,13 +58,19 @@ def ipa_ok(path):
         return False
 
 
+INFO_PLIST_MAX = 4 * 1024 * 1024  # обычный Info.plist — десятки КБ
+
+
 def ipa_info(ipa):
     """Info.plist приложения внутри IPA (CFBundleIdentifier, MinimumOSVersion, …) или {}."""
     try:
         with zipfile.ZipFile(ipa) as z:
-            name = next(n for n in z.namelist()
-                        if n.count("/") == 2 and n.startswith("Payload/") and n.endswith(".app/Info.plist"))
-            return plistlib.loads(z.read(name))
+            info = next(i for i in z.infolist()
+                        if i.filename.count("/") == 2 and i.filename.startswith("Payload/")
+                        and i.filename.endswith(".app/Info.plist"))
+            if info.file_size > INFO_PLIST_MAX:
+                return {}
+            return plistlib.loads(z.read(info))
     except (OSError, StopIteration, zipfile.BadZipFile, ValueError, plistlib.InvalidFileException):
         return {}
 

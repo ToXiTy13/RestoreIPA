@@ -118,6 +118,9 @@ class AppleAnswers(unittest.TestCase):
         out = 'log line\n{"externalVersionIdentifiers": [100, 300, 200], "bundleID": "x"}\n{"other": 1}\nbad {'
         self.assertEqual(apple.parse_versions(out), ["300", "200", "100"])
         self.assertEqual(apple.parse_versions("ничего"), [])
+        # ID версии — только число: остальное не попадает ни в список, ни в имя файла
+        self.assertEqual(apple.parse_versions('{"externalVersionIdentifiers": [5, "7", "x/1", "", null, -3]}'),
+                         ["7", "5"])
 
     def test_parse_purchases(self):
         out = "\n".join([
@@ -177,6 +180,10 @@ class Device(unittest.TestCase):
             bad.write_text("не zip", encoding="utf-8")
             self.assertFalse(device.ipa_ok(bad))
             self.assertEqual(device.ipa_info(bad), {})
+            big = Path(d) / "big.ipa"  # Info.plist больше разумного размера не читается в память
+            with zipfile.ZipFile(big, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr("Payload/X.app/Info.plist", b"\0" * (device.INFO_PLIST_MAX + 1))
+            self.assertEqual(device.ipa_info(big), {})
 
 
 class Storage(unittest.TestCase):
@@ -297,15 +304,20 @@ class Processes(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform.startswith("win"), "поиск программ в текущей папке есть только на Windows")
 class ToolLookup(unittest.TestCase):
-    def test_planted_exe_in_current_folder_is_not_used(self):
-        """ipatool.exe в текущей папке не должен находиться раньше PATH: он получил бы пароль Apple ID."""
+    def test_tools_are_searched_only_in_path(self):
+        """Программы ищутся только в папках PATH, не в текущей папке."""
         self.assertEqual(os.environ.get("NoDefaultCurrentDirectoryInExePath"), "1")
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "ipatool_planted_test.exe").write_bytes(b"")
+            (Path(d) / "ipatool_cwd_test.exe").write_bytes(b"")
             old = os.getcwd()
             os.chdir(d)
             try:
-                self.assertIsNone(shutil.which("ipatool_planted_test"))
+                self.assertIsNone(shutil.which("ipatool_cwd_test"))
+                # пустой элемент или «.» в PATH тоже означают текущую папку (issue #1)
+                dirty = os.pathsep.join(["", ".", "relative\\dir", os.environ["PATH"], ""])
+                self.assertIsNone(shutil.which("ipatool_cwd_test", path=core.safe_path(dirty)))
+                self.assertEqual(core.safe_path(dirty), core.safe_path(os.environ["PATH"]))
+                self.assertNotIn("", os.environ["PATH"].split(os.pathsep))
             finally:
                 os.chdir(old)
 
@@ -335,6 +347,89 @@ class MacOnly(unittest.TestCase):
         path = Path(os.environ.get("SSL_CERT_FILE", ""))
         self.assertTrue(path.is_file(), f"нет набора сертификатов: {path}")
         self.assertGreater(ssl.create_default_context().cert_store_stats()["x509_ca"], 0)
+
+
+class IpatoolIntegrity(unittest.TestCase):
+    @staticmethod
+    def macho(code, signature):
+        """Минимальный 64-битный Mach-O: сегмент __LINKEDIT, LC_CODE_SIGNATURE, код, подпись."""
+        import struct
+        header_size = 32 + 72 + 16
+        sig_off = header_size + len(code)
+        linkedit = struct.pack("<II16sQQQQiiII", 0x19, 72, b"__LINKEDIT", 0, len(signature), sig_off,
+                               len(signature), 1, 1, 0, 0)
+        codesig = struct.pack("<IIII", 0x1D, 16, sig_off, len(signature))
+        header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 2, 88, 0, 0)
+        return header + linkedit + codesig + code + signature
+
+    def test_mac_code_hash_ignores_signature_only(self):
+        """PyInstaller переподписывает ipatool в .app: хеш кода тот же, а изменённый код — уже другой хеш."""
+        with tempfile.TemporaryDirectory() as d:
+            a, b, c = (Path(d) / n for n in "abc")
+            a.write_bytes(self.macho(b"CODE" * 100, b"official-signature" * 20))
+            b.write_bytes(self.macho(b"CODE" * 100, b"adhoc" * 7))
+            c.write_bytes(self.macho(b"C0DE" + b"CODE" * 99, b"adhoc" * 7))
+            self.assertEqual(apple.macho_code_sha256(a), apple.macho_code_sha256(b))
+            self.assertNotEqual(apple.macho_code_sha256(b), apple.macho_code_sha256(c))
+            (Path(d) / "x").write_bytes(b"MZ not a mac program")
+            with self.assertRaises(ValueError):
+                apple.macho_code_sha256(Path(d) / "x")
+
+    @staticmethod
+    def macho_unsigned_and_signed(code, strings, signature):
+        """Mach-O без подписи (как ipatool для Intel) и он же после подписи при сборке .app: в заголовке
+        добавлена LC_CODE_SIGNATURE, перед подписью — выравнивание до 16 байт."""
+        import struct
+        header_size = 32 + 72 + 24 + 16  # __LINKEDIT, LC_SYMTAB и свободное место под LC_CODE_SIGNATURE
+        stroff = header_size + len(code)
+        pad = (-(stroff + len(strings))) % 16
+        sig_off = stroff + len(strings) + pad
+
+        def linkedit(filesize):
+            return struct.pack("<II16sQQQQiiII", 0x19, 72, b"__LINKEDIT", 0, filesize, stroff, filesize, 1, 1, 0, 0)
+
+        symtab = struct.pack("<IIIIII", 0x2, 24, stroff, 0, stroff, len(strings))
+        unsigned = (struct.pack("<IiiIIIII", 0xFEEDFACF, 0x01000007, 3, 2, 2, 96, 0, 0)
+                    + linkedit(len(strings)) + symtab + bytes(16) + code + strings)
+        signed = (struct.pack("<IiiIIIII", 0xFEEDFACF, 0x01000007, 3, 2, 3, 112, 0, 0)
+                  + linkedit(len(strings) + pad + len(signature)) + symtab
+                  + struct.pack("<IIII", 0x1D, 16, sig_off, len(signature)) + code + strings + bytes(pad) + signature)
+        return unsigned, signed
+
+    def test_mac_code_hash_when_signature_added(self):
+        """Официальный файл без подписи, подпись добавлена при сборке .app: хеш как у файла до подписи."""
+        strings = b"\0_main\0_start\0"  # длина не кратна 16 — перед подписью будет выравнивание
+        with tempfile.TemporaryDirectory() as d:
+            off, sig, other = (Path(d) / n for n in ("official", "signed", "other"))
+            pair = self.macho_unsigned_and_signed(b"CODE" * 100, strings, b"adhoc" * 7)
+            off.write_bytes(pair[0])
+            sig.write_bytes(pair[1])
+            other.write_bytes(self.macho_unsigned_and_signed(b"C0DE" + b"CODE" * 99, strings, b"adhoc" * 7)[1])
+            official = apple.macho_code_sha256(off)
+            self.assertEqual(apple.macho_code_hashes(off), (official, None))
+            self.assertIn(official, apple.macho_code_hashes(sig))
+            self.assertNotIn(official, apple.macho_code_hashes(other))
+
+    def test_genuine_only_with_official_hash(self):
+        import platform
+        key = f"{sys.platform}-{platform.machine().lower()}"
+        with tempfile.TemporaryDirectory() as d:
+            tool = Path(d) / "ipatool.exe"
+            tool.write_bytes(self.macho(b"CODE" * 100, b"sig") if sys.platform == "darwin" else b"official")
+            with mock.patch.dict(apple.IPATOOL_SHA256, {key: apple.ipatool_digest(tool)}):
+                self.assertTrue(apple.ipatool_genuine(str(tool)))
+                tool.write_bytes(self.macho(b"EVIL" * 101, b"sig") if sys.platform == "darwin" else b"planted!!")
+                self.assertFalse(apple.ipatool_genuine(str(tool)))  # изменение после первой проверки тоже видно
+            with mock.patch.dict(apple.IPATOOL_SHA256, {key: ""}):
+                self.assertIsNone(apple.ipatool_genuine(str(tool)))  # для системы без сборки хеша нет
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "ipatool.exe для Windows")
+    def test_hash_matches_ipatool_from_build(self):
+        """IPATOOL_SHA256 — хеш того самого ipatool, который build.ps1 скачивает и сверяет (не устарел)."""
+        res = Path(__file__).resolve().parent.parent / "build" / "res" / "ipatool.exe"
+        if not res.is_file():
+            self.skipTest("сборка ещё не запускалась: нет build\\res\\ipatool.exe")
+        self.assertEqual(apple.sha256_file(res), apple.IPATOOL_SHA256["win32-amd64"])
 
 
 def lookup_answer(body):

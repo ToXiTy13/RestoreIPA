@@ -1,10 +1,13 @@
 """ipatool и сервера Apple: запуск команд, разбор ответов, понятные объяснения ошибок. Без интерфейса."""
 import contextlib
+import hashlib
 import json
 import os
+import platform
 import queue
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -24,6 +27,13 @@ SESSION_LOST = re.compile(r"failed to get account|keyring|not logged|sign.?in|pa
 SCAN_ROOT = core.DATA_DIR / "scan"
 UNICORN_VERSION = "2.1.4"
 UNICORN_SHA256 = "d8f9a89222ffa74493a1d47090e17f8e1db8ac171a3128c6a76a4ea09de11469"  # как в исходниках ipatool
+# официальный ipatool 2.7.0 (build.ps1, build_mac.sh): встроенный сверяется с ним перед запуском.
+# На macOS — хеш кода без подписи (ipatool_digest): PyInstaller переподписывает программы внутри .app
+IPATOOL_SHA256 = {
+    "win32-amd64": "7b83589b74ad533f5d5dbab0ca87a5cb76b123bcbeb2553d57e9c154e35d8755",
+    "darwin-arm64": "f64c6ccdd10548ef1f0ad69fd539feeee03831fdb4c18ce5946ebaf7329796df",
+    "darwin-x86_64": "95108a8328021a4cefe415cb38086e81e9a56c180decc9fcb60e2bdea418c249",
+}
 # адреса, без которых не работает вход/скачивание (для «Проверить связь с Apple»)
 APPLE_HOSTS = (
     ("buy.itunes.apple.com", "вход и лицензии"),
@@ -64,12 +74,77 @@ def adopt_old_cache():
 
 
 def sha256_file(path):
-    import hashlib
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def macho_code_sha256(path):
+    """SHA-256 программы macOS (64-битный Mach-O) без подписи: всё до подписи, а в заголовке — без описания подписи
+    (LC_CODE_SIGNATURE) и сегмента __LINKEDIT, где лежит её размер. Код при переподписи не меняется, хеш тоже."""
+    return macho_code_hashes(path)[0]
+
+
+def macho_code_hashes(path):
+    """Хеши кода Mach-O без подписи (см. macho_code_sha256) для двух случаев:
+    0 — у официального файла уже была подпись, и при сборке .app её заменили (ipatool для arm64);
+    1 — официальный файл был без подписи, и её добавили при сборке (ipatool для Intel): в заголовке на одну команду
+        больше, а перед подписью — выравнивание; хеш — как у файла до подписи: команды без LC_CODE_SIGNATURE,
+        содержимое до конца таблицы строк (LC_SYMTAB). Без подписи — только первый, второй None."""
+    data = bytearray(Path(path).read_bytes())
+    if data[:4] != b"\xcf\xfa\xed\xfe":
+        raise ValueError("не 64-битный Mach-O")
+    ncmds, sizeofcmds = struct.unpack_from("<II", data, 16)
+    off, end, sig_size, strings_end = 32, len(data), 0, None
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", data, off)
+        if cmd == 0x1D:  # LC_CODE_SIGNATURE
+            end = struct.unpack_from("<I", data, off + 8)[0]
+            sig_size = size
+            data[off:off + size] = bytes(size)
+        elif cmd == 0x19 and data[off + 8:off + 24].rstrip(b"\0") == b"__LINKEDIT":  # LC_SEGMENT_64
+            data[off:off + size] = bytes(size)
+        elif cmd == 0x2:  # LC_SYMTAB: symoff, nsyms, stroff, strsize
+            stroff, strsize = struct.unpack_from("<II", data, off + 16)
+            strings_end = stroff + strsize
+        off += size
+    replaced = hashlib.sha256(bytes(data[:end])).hexdigest()
+    if not sig_size:
+        return replaced, None
+    struct.pack_into("<II", data, 16, ncmds - 1, sizeofcmds - sig_size)
+    added_end = strings_end if strings_end and strings_end <= end else end
+    return replaced, hashlib.sha256(bytes(data[:added_end])).hexdigest()
+
+
+def ipatool_digest(path):
+    return macho_code_sha256(path) if sys.platform == "darwin" else sha256_file(path)
+
+
+def ipatool_digests(path):
+    """Все хеши, по которым ipatool сверяется с IPATOOL_SHA256 (на macOS — оба случая macho_code_hashes)."""
+    if sys.platform == "darwin":
+        return {h for h in macho_code_hashes(path) if h}
+    return {sha256_file(path)}
+
+
+_ipatool_checked = {}  # путь -> (размер, время изменения, результат): 40 МБ не читаем на каждый запуск ipatool
+
+
+def ipatool_genuine(path):
+    """Совпадает ли ipatool с официальным (IPATOOL_SHA256). None — для этой системы хеша нет (сборок под неё нет)."""
+    expected = IPATOOL_SHA256.get(f"{sys.platform}-{platform.machine().lower()}")
+    if not expected:
+        return None
+    try:
+        st = os.stat(path)
+        key = (st.st_size, st.st_mtime_ns)
+        if _ipatool_checked.get(path, (None,))[:2] != key:
+            _ipatool_checked[path] = (*key, expected in ipatool_digests(path))
+        return _ipatool_checked[path][2]
+    except (OSError, ValueError, struct.error):
+        return False
 
 
 def seed_unicorn():
@@ -118,7 +193,8 @@ HINTS = (
      "Нажмите «Проверить связь с Apple» в меню «⋯» вверху справа."),
     (r"x509|certificate|tls: ",
      "Защищённое соединение с Apple перехватывается. Обычно это антивирус с проверкой HTTPS (Касперский, ESET, "
-     "Dr.Web) — отключите в нём проверку защищённых соединений или добавьте программу в исключения."),
+     "Dr.Web). Добавьте в его исключения проверки защищённых соединений адреса Apple (*.apple.com) или программу "
+     "Restore — отключать проверку целиком не нужно."),
     (ACCOUNT_LOCKED,
      "Apple заблокировал этот Apple ID. Пароль ни при чём: восстановите доступ на iforgot.apple.com."),
     # «Your Apple ID or password was entered incorrectly.» — но не любое «incorrect» в выводе
@@ -366,8 +442,8 @@ def parse_versions(out):
         except ValueError:
             continue
         if isinstance(obj, dict) and isinstance(obj.get("externalVersionIdentifiers"), list):
-            versions.update(str(x) for x in obj["externalVersionIdentifiers"])
-    return sorted(versions, key=lambda x: int(x) if x.isdigit() else 0, reverse=True)
+            versions.update(str(x) for x in obj["externalVersionIdentifiers"] if str(x).isdigit())
+    return sorted(versions, key=int, reverse=True)
 
 
 def clip(text, limit=700, head=450, tail=250):

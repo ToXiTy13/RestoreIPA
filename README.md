@@ -59,7 +59,7 @@
 ## Что нужно
 
 - **Windows 10 или 11** (64-бит) и **iTunes** или **«Устройства Apple»** (Apple Devices) из Microsoft Store — это драйвер, без него Windows не видит iPhone.
-- **или Mac на процессоре Apple** (M1 и новее) с macOS 12 или новее. Ничего дополнительно ставить не нужно: iPhone macOS видит сама. Для Mac на Intel сборки пока нет.
+- **или Mac** с macOS 12 или новее — на процессоре Apple (M1 и новее) или Intel. Ничего дополнительно ставить не нужно: iPhone macOS видит сама.
 - iPhone и кабель. Телефон разблокирован, на запрос «Доверять этому компьютеру?» нажмите «Доверять».
 - Apple ID, под которым приложение когда-то скачивалось.
 
@@ -80,7 +80,7 @@
 
 ### macOS
 
-1. Скачайте `Restore-<версия>-macos-arm64.dmg` со страницы [Releases](../../releases/latest).
+1. Скачайте со страницы [Releases](../../releases/latest) образ для своего Mac: `Restore-<версия>-macos-arm64.dmg` — для процессора Apple (M1 и новее), `Restore-<версия>-macos-intel.dmg` — для Intel. Какой у вас процессор, видно в меню Apple → «Об этом Mac»: строка «Чип» (Apple M…) или «Процессор» (Intel).
 2. Откройте его и перетащите **Restore** в папку «Программы».
 3. Запустите Restore из «Программ».
 
@@ -190,7 +190,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 Нужен Python 3.12: с [python.org](https://www.python.org/downloads/), `winget install Python.Python.3.12` или `py install 3.12`. Скрипт находит его сам — через `py`, в `PATH` или в обычной папке установки; другой путь можно указать переменной `PYTHON` (`$env:PYTHON = 'C:\путь\к\python.exe'`). Для установщика нужен [Inno Setup 6](https://jrsoftware.org/isinfo.php), без него — флаг `-SkipInstaller`.
 
-Скрипт создаёт окружение `build\venv` (Python 3.12, версии из `requirements-build.txt`), скачивает ipatool 2.7.0 и Unicorn 2.1.4 из официальных релизов **со сверкой SHA-256** и прогоняет тесты. Затем собирает (PyInstaller):
+Скрипт создаёт окружение `build\venv` (Python 3.12, пакеты из `requirements-lock.txt`), скачивает ipatool 2.7.0 и Unicorn 2.1.4 из официальных релизов **со сверкой SHA-256** и прогоняет тесты. Затем собирает (PyInstaller):
 - `dist\RestoreAppStore.exe` — портативная версия одним файлом;
 - `dist\RestoreAppStore\` — та же программа папкой, для установщика;
 
@@ -206,11 +206,27 @@ bash build_mac.sh
 - `dist/Restore.app` — программа с подписью без сертификата (ad-hoc), без неё Apple Silicon её не запустит;
 - `dist/Restore-<версия>-macos-<arm64|intel>.dmg` — образ для установки перетаскиванием и `.sha256` к нему.
 
-Архитектура сборки — как у Python, которым запущен скрипт: на Mac с процессором Apple получится `arm64`, на Intel — `intel` (для неё нужен ещё OpenSSL из Homebrew: `brew install openssl@3`).
+Архитектура сборки — как у Python, которым запущен скрипт: на Mac с процессором Apple получится `arm64`, на Intel — `intel`. Для `intel` пакет cryptography собирается из исходников (готового для Intel нет), поэтому нужны ещё Rust и OpenSSL 3, например из Homebrew: `brew install rust openssl@3`. OpenSSL можно указать и переменной `OPENSSL_DIR` (папка с `include` и `lib`).
+
+Сборку для Intel можно сделать и на Mac с процессором Apple — через Rosetta, Python 3.12 с python.org (он универсальный), Rust для `x86_64-apple-darwin` и OpenSSL, собранный для `x86_64`:
+
+```bash
+OPENSSL_DIR=<папка OpenSSL для x86_64> arch -x86_64 bash build_mac.sh
+```
+
+Окружение `build/venv` у каждой архитектуры своё: перед сборкой для другой архитектуры переименуйте или удалите его.
+
+### Пакеты сборки
+
+`requirements-build.txt` — основные пакеты, `requirements-lock.txt` — все пакеты сборки (с зависимостями) с точными версиями и SHA-256 для Windows и macOS. Оба скрипта сборки ставят пакеты только из `requirements-lock.txt` и с проверкой хешей (`pip --require-hashes`). Чтобы обновить пакеты, поменяйте версии в `requirements-build.txt` и пересоберите список ([uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv pip compile requirements-build.txt --universal --python-version 3.12 --generate-hashes --no-header --no-annotate -o requirements-lock.txt
+```
 
 ### Проверки при сборке
 
-Из Qt в сборку попадает только то, что нужно интерфейсу (список исключений — `DROP` в `RestoreAppStore.spec`). После сборки программа запускается с ключом `--check-ui`: интерфейс загружается без показа окна, и если из Qt вырезано что-то нужное, сборка останавливается. На macOS скрипт ещё проверяет встроенный установщик на iPhone, подпись `.app` и что внутри нет битых ссылок.
+Из Qt в сборку попадает только то, что нужно интерфейсу (список исключений — `DROP` в `RestoreAppStore.spec`). После сборки программа запускается с ключом `--check-ui`: интерфейс загружается без показа окна, и если из Qt вырезано что-то нужное, сборка останавливается. При той же проверке встроенный ipatool сверяется с официальным (`IPATOOL_SHA256` в `restore_gui/apple.py`). На macOS скрипт ещё проверяет встроенный установщик на iPhone, подпись `.app` и что внутри нет битых ссылок.
 
 Версия программы задаётся в `restore_apps.py` (`__version__`).
 

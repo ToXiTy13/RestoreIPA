@@ -19,9 +19,9 @@ import restore_apps as core
 
 from . import storage
 from .apple import (ANSI, APPLE_HOSTS, SESSION_LOST, ProcsClosed, adopt_old_cache, bundled, clear_stale_locks, clip,
-                    explain_error, fatal_error, fetch_available, forget, in_session_copies, kill_procs,
-                    list_versions_cmd, ownership, parse_purchases, parse_versions, popen, run_quiet, sap_ready,
-                    scan_copies, seed_unicorn)
+                    explain_error, fatal_error, fetch_available, forget, in_session_copies, ipatool_genuine,
+                    kill_procs, list_versions_cmd, ownership, parse_purchases, parse_versions, popen, run_quiet,
+                    sap_ready, scan_copies, seed_unicorn)
 from .device import installer_cmd, ipa_info, ipa_ok, probe_device, vtuple
 
 SCAN_WORKERS = 4  # параллельных проверок владения
@@ -110,6 +110,15 @@ class TasksMixin:
     def find_tool(self, name, hint, ask=True):
         path = self.tool_paths.get(name) or bundled(name) or shutil.which(name)
         if path and Path(path).exists():
+            # встроенный ipatool запускается, только если совпадает с официальным (apple.IPATOOL_SHA256)
+            if name == "ipatool" and core.FROZEN and path == bundled(name) and ipatool_genuine(path) is False:
+                self.log(f"Встроенный ipatool не совпадает с официальным ipatool 2.7.0 (файл изменён): {path}")
+                if ask:
+                    self.show_notice("ipatool изменён",
+                                     "Встроенный ipatool не совпадает с официальным: файл повреждён или изменён, "
+                                     "поэтому программа его не запускает.\n\n"
+                                     "Переустановите Restore, скачав его со страницы релизов на GitHub.")
+                return None
             return path
         if not ask:
             return None
@@ -256,6 +265,8 @@ class TasksMixin:
             self.log("Служебные файлы ipatool перенесены из %LOCALAPPDATA%\\ipatool в папку программы.")
         if seed_unicorn():
             self.log("Эмулятор для входа (Unicorn 2.1.4) подготовлен из встроенной копии — GitHub не нужен.")
+        if core.FROZEN and bundled("ipatool"):
+            ipatool_genuine(bundled("ipatool"))  # заранее, в фоне: при входе сверка уже готова и окно не ждёт
 
     # ---------- сессия ----------
     def wipe_session(self, revoke=True):
@@ -407,6 +418,7 @@ class TasksMixin:
 
     def task_download(self, ipatool, app_id, name, purchase, version=None, fallback=False):
         core.OUT_DIR.mkdir(parents=True, exist_ok=True)  # «ipa» рядом с exe или Документы\Restore\ipa
+        version = str(version) if version and str(version).isdigit() else ""  # ID версии в App Store — число
         suffix = f"_v{version}" if version else ""
         dest = core.OUT_DIR / f"{core.slug(name)}_{app_id}{suffix}.ipa"
         if version:

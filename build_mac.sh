@@ -32,11 +32,17 @@ PY=build/venv/bin/python
 if [ "$ARCH" = "x86_64" ]; then
     # для Intel готовой сборки cryptography нет — pip собирает её из исходников с OpenSSL из Homebrew. Собираем со
     # встроенным (статическим) OpenSSL: иначе её libssl.3.dylib в .app совпадает по имени со старой копией Python
-    # и cryptography не загружается (Symbol not found: _SSL_get0_group_name)
-    OPENSSL_DIR="$(brew --prefix openssl@3)"
+    # и cryptography не загружается (Symbol not found: _SSL_get0_group_name).
+    # Другой OpenSSL для x86_64 (например, собранный на Mac с процессором Apple) — переменной OPENSSL_DIR
+    OPENSSL_DIR="${OPENSSL_DIR:-$(brew --prefix openssl@3)}"
     export OPENSSL_DIR OPENSSL_STATIC=1
+    # пути к исходникам Rust-пакетов попадают в собранную библиотеку: домашняя папка заменяется нейтральным путём,
+    # а собранное раньше pip берёт не из кэша, а собирает заново
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$HOME=/build-home"
+    export PIP_NO_CACHE_DIR=1
 fi
-"$PY" -m pip install --disable-pip-version-check -q -r requirements-build.txt
+# все пакеты сборки — точные версии с SHA-256 (requirements-lock.txt собран из requirements-build.txt, см. README)
+"$PY" -m pip install --disable-pip-version-check -q --require-hashes -r requirements-lock.txt
 
 # --- ipatool для Mac ---
 mkdir -p build/dl build/res
@@ -105,6 +111,12 @@ if [ -n "$BROKEN" ]; then
     exit 1
 fi
 codesign --verify --deep --strict --verbose=2 "$APP"
+# в программе не должно быть путей к домашней папке того, кто собирает (имени пользователя этого Mac)
+HOME_REFS="$(grep -rlaF "$HOME/" "$APP" || true)"
+if [ -n "$HOME_REFS" ]; then
+    echo "В .app есть пути к домашней папке ($HOME):"$'\n'"$HOME_REFS" >&2
+    exit 1
+fi
 
 # --- образ .dmg: Restore.app и ярлык «Программы» для перетаскивания ---
 DMG="dist/Restore-$VERSION-macos-$LABEL.dmg"

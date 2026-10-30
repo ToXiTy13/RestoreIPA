@@ -69,8 +69,9 @@ russian.ClickFinish=
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
 
 [InstallDelete]
-; при обновлении: библиотеки прошлой версии могут не совпадать с новыми по составу
-Type: filesandordirs; Name: "{app}\_internal"
+; при обновлении: библиотеки прошлой версии могут не совпадать с новыми по составу.
+; Только если в папке уже стоит Restore: папка _internal бывает и у других программ
+Type: filesandordirs; Name: "{app}\_internal"; Check: RestoreInstalledHere
 
 [Files]
 ; программа папкой (dist\RestoreAppStore\: exe + _internal): в отличие от exe одним файлом,
@@ -93,6 +94,12 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags
 Type: filesandordirs; Name: "{localappdata}\Restore"
 
 [Code]
+// в выбранной папке уже установлен Restore (обновление), а не лежит другая программа
+function RestoreInstalledHere: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\{#AppExe}')) and FileExists(ExpandConstant('{app}\installed.txt'));
+end;
+
 // страница «Ярлык» — последняя перед установкой (страница «Всё готово» отключена): кнопка сразу «Установить»
 procedure CurPageChanged(CurPageID: Integer);
 begin

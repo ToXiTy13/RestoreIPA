@@ -121,6 +121,12 @@ def check_ui(report):
     engine, _backend = create(app, background=False, visible=False)
     for _ in range(5):
         app.processEvents()
+    import restore_apps as core
+    if core.FROZEN:  # в сборке должен быть официальный ipatool (не та версия или сломана переподпись — ошибка)
+        from .apple import bundled, ipatool_genuine
+        tool = bundled("ipatool")
+        if not tool or ipatool_genuine(tool) is False:
+            msgs.append(f"Встроенный ipatool не совпадает с официальным (apple.IPATOOL_SHA256): {tool}")
     ok = bool(engine.rootObjects()) and not msgs
     Path(report).write_text(("OK" if ok else "FAIL") + "\n" + "\n".join(msgs), encoding="utf-8")
     return 0 if ok else 1

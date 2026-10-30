@@ -39,10 +39,17 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+
+def safe_path(path):
+    """PATH только из полных путей: пустой элемент («a;;b», «;» в конце), «.» и относительные пути означают
+    текущую папку, а программы ищутся только в папках из PATH."""
+    return os.pathsep.join(p for p in (path or "").split(os.pathsep) if p.strip() and os.path.isabs(p.strip('" ')))
+
+
 if sys.platform.startswith("win"):
-    # иначе Windows (и shutil.which) ищет ipatool.exe сначала в текущей папке, и подложенный там файл
-    # получил бы пароль Apple ID; влияет и на поиск программ дочерними процессами
+    # программы (ipatool и др.) ищутся только по PATH, без текущей папки — и у самой программы, и у дочерних процессов
     os.environ.setdefault("NoDefaultCurrentDirectoryInExePath", "1")
+    os.environ["PATH"] = safe_path(os.environ.get("PATH"))
 elif sys.platform == "darwin":
     # Python с python.org (и собранный из него .app) на macOS не видит системные сертификаты: любой HTTPS-запрос
     # (иконки, iTunes Lookup, обновления) падает с CERTIFICATE_VERIFY_FAILED. Берём набор Mozilla из certifi
@@ -59,7 +66,7 @@ HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resol
 _CSV = "removed_ru_appstore_app_ids.csv"
 # CSV рядом с программой имеет приоритет над встроенным: его можно править
 CATALOG = HERE / _CSV if (HERE / _CSV).exists() else BUNDLE / _CSV
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 APP_NAME = "Restore"
 
 

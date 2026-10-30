@@ -18,6 +18,7 @@ $UnicornUrl = "https://github.com/unicorn-engine/unicorn/releases/download/2.1.4
 $UnicornSha = "0960f938e66fa12c448742bddd2a03aa88abeeb2b3cda7156493a2da86228d3a"  # digest ассета в релизе 2.1.4
 $UnicornDllSha = "d8f9a89222ffa74493a1d47090e17f8e1db8ac171a3128c6a76a4ea09de11469"  # = UNICORN_SHA256 в restore_apps_gui.py
 $UnicornLicenseUrl = "https://raw.githubusercontent.com/unicorn-engine/unicorn/2.1.4/COPYING"
+$UnicornLicenseSha = "6f04ae8364d0079a192b14635f4b1da294ce18724c034c39a6a41d1b09df6100"
 
 function Assert-Hash($path, $sha) {
     $h = (Get-FileHash $path -Algorithm SHA256).Hash
@@ -72,7 +73,8 @@ if (-not (Test-Path $py)) {
     Write-Host "Создаю build\venv (Python 3.12: $($base -join ' '))"
     Invoke-Native @base -m venv build\venv
 }
-Invoke-Native $py -m pip install --disable-pip-version-check -q -r requirements-build.txt
+# все пакеты сборки — точные версии с SHA-256 (requirements-lock.txt собран из requirements-build.txt, см. README)
+Invoke-Native $py -m pip install --disable-pip-version-check -q --require-hashes -r requirements-lock.txt
 
 # --- внешние компоненты ---
 New-Item -ItemType Directory -Force build\dl, build\res | Out-Null
@@ -92,10 +94,7 @@ $dll = Get-ChildItem build\dl\unicorn -Recurse -Filter "libunicorn.dll" | Select
 if (-not $dll) { throw "В архиве Unicorn нет libunicorn.dll" }
 Assert-Hash $dll.FullName $UnicornDllSha
 Copy-Item $dll.FullName build\res\libunicorn.dll -Force
-if (-not (Test-Path build\res\UNICORN_COPYING.txt)) {
-    $ProgressPreference = "SilentlyContinue"
-    Invoke-WebRequest $UnicornLicenseUrl -OutFile build\res\UNICORN_COPYING.txt
-}
+Get-Checked $UnicornLicenseUrl build\res\UNICORN_COPYING.txt $UnicornLicenseSha
 
 # --- тесты: сломанную логику не собираем ---
 Write-Host "Тесты"
