@@ -4,6 +4,7 @@
 import contextlib
 import importlib.util
 import ipaddress
+import os
 import re
 import shutil
 import socket
@@ -18,13 +19,14 @@ from pathlib import Path
 import restore_apps as core
 
 from . import storage
-from .apple import (ANSI, APPLE_HOSTS, SESSION_LOST, ProcsClosed, adopt_old_cache, bundled, clear_stale_locks, clip,
-                    explain_error, fatal_error, fetch_available, forget, in_session_copies, ipatool_genuine,
-                    kill_procs, list_versions_cmd, ownership, parse_purchases, parse_versions, popen, run_quiet,
-                    sap_ready, scan_copies, seed_unicorn)
+from .apple import (ANSI, APPLE_HOSTS, APPLE_OWN_CA, IPATOOL_VERSION, SESSION_LOST, ProcsClosed, adopt_old_cache,
+                    bundled, clear_stale_locks, clip, drop_keychain_items, drop_old_sap, explain_error, fatal_error,
+                    fetch_available, forget, in_session_copies, ipatool_genuine, kill_procs, list_versions_cmd,
+                    ownership, parse_purchases, parse_versions, popen, run_quiet, sap_ready, scan_copies, seed_unicorn)
 from .device import installer_cmd, ipa_info, ipa_ok, probe_device, vtuple
 
-SCAN_WORKERS = 4  # параллельных проверок владения
+# параллельных проверок владения: каждый ipatool — до ~0,5 ГБ памяти и больше ядра процессора на 6–8 с
+SCAN_WORKERS = max(2, min(4, (os.cpu_count() or 4) // 2))
 IPATOOL_MISSING = "ipatool не найден в PATH (https://github.com/majd/ipatool/releases)."
 
 
@@ -112,7 +114,7 @@ class TasksMixin:
         if path and Path(path).exists():
             # встроенный ipatool запускается, только если совпадает с официальным (apple.IPATOOL_SHA256)
             if name == "ipatool" and core.FROZEN and path == bundled(name) and ipatool_genuine(path) is False:
-                self.log(f"Встроенный ipatool не совпадает с официальным ipatool 2.7.0 (файл изменён): {path}")
+                self.log(f"Встроенный ipatool не совпадает с официальным ipatool {IPATOOL_VERSION} (файл изменён): {path}")
                 if ask:
                     self.show_notice("ipatool изменён",
                                      "Встроенный ipatool не совпадает с официальным: файл повреждён или изменён, "
@@ -263,6 +265,8 @@ class TasksMixin:
     def _prepare_engine(self):
         if adopt_old_cache():
             self.log("Служебные файлы ipatool перенесены из %LOCALAPPDATA%\\ipatool в папку программы.")
+        if drop_old_sap():
+            self.log("Удалены служебные файлы Apple от прежней версии ipatool: новой они не нужны.")
         if seed_unicorn():
             self.log("Эмулятор для входа (Unicorn 2.1.4) подготовлен из встроенной копии — GitHub не нужен.")
         if core.FROZEN and bundled("ipatool"):
@@ -292,6 +296,7 @@ class TasksMixin:
             for d in scan_copies():
                 existed = existed or (d / "w0" / ".ipatool").exists()
                 shutil.rmtree(d, ignore_errors=True)
+            drop_keychain_items()  # macOS: записи ipatool в «Связке ключей» — сессия и состояние компьютера для входа
             return existed
         finally:
             if got:
@@ -366,8 +371,10 @@ class TasksMixin:
             self.log("Нет доступа к itunes.apple.com: проверю по аккаунту все приложения каталога (дольше).")
         else:
             todo = [i for i in ids if i not in avail]
-            self.log(f"Удалено из App Store: {len(todo)}. Спрашиваю Apple, какие из них были у вас. Это может занять "
-                     "несколько минут; кнопка «Остановить» прервёт проверку, найденное останется в списке.")
+            self.log(f"Удалено из App Store: {len(todo)}.")
+        minutes = max(1, round(len(todo) * 7 / SCAN_WORKERS / 60))  # одна проверка — около 7 с
+        self.log(f"Спрашиваю Apple, какие из них были у вас. Это займёт около {minutes} мин; найденное появляется в "
+                 "списке сразу, кнопка «Остановить» прервёт проверку.")
         owned, state = {}, {"unknown": 0, "consec": 0, "err": "", "done": 0, "abort": False}
         lock = threading.Lock()
         kc = core.keychain_args()
@@ -457,10 +464,22 @@ class TasksMixin:
         storage.record_download(app_id, version)
         return dest
 
+    @contextlib.contextmanager
+    def phone_op(self):
+        """Работа с iPhone (сведения, список приложений, установка): фоновый опрос watch_device в это время ждёт."""
+        with self._phone_lock:
+            self.phone_ops += 1
+        try:
+            yield
+        finally:
+            with self._phone_lock:
+                self.phone_ops -= 1
+
     def task_install(self, installer, ipa):
         self.log("Подключите iPhone по USB, разблокируйте и нажмите «Доверять».")
-        self.note_if_installed(installer, ipa)
-        rc, out = self.stream(installer_cmd(installer, "install", ipa))
+        with self.phone_op():
+            self.note_if_installed(installer, ipa)
+            rc, out = self.stream(installer_cmd(installer, "install", ipa))
         self.log("Установлено." if rc == 0 else f"Установка не удалась (код {rc}).")
         if rc != 0:
             self.hint(out)
@@ -477,13 +496,14 @@ class TasksMixin:
 
     def device_ios(self, installer):
         """Версия iOS подключённого iPhone или None."""
-        info = probe_device()
-        if info and info.get("ios"):
-            return info["ios"]
-        cmd = installer_cmd(installer, "info") if installer else None
-        if not cmd:
-            return None
-        rc, out = run_quiet(cmd, timeout=45, tag="task")
+        with self.phone_op():
+            info = probe_device()
+            if info and info.get("ios"):
+                return info["ios"]
+            cmd = installer_cmd(installer, "info") if installer else None
+            if not cmd:
+                return None
+            rc, out = run_quiet(cmd, timeout=45, tag="task")
         if rc != 0:
             return None
         m = re.search(r'"?ProductVersion"?\s*[:=]\s*"?(\d+(?:\.\d+){0,2})', out) or \
@@ -607,9 +627,10 @@ class TasksMixin:
 
     # ---------- iPhone ----------
     def watch_device(self):
-        """Фоновая проверка подключения iPhone (раз в 4 с, пока нет долгой операции)."""
+        """Фоновая проверка подключения iPhone раз в 4 с — и во время входа, поиска и скачивания; пауза — только
+        пока программа сама работает с iPhone (phone_op)."""
         while True:
-            if not self.busy:
+            if not self.phone_ops:
                 info = probe_device()
                 if info != self.device:
                     self.device = info
@@ -633,9 +654,13 @@ class TasksMixin:
                 bad.append(host)
                 continue
             try:
-                req = urllib.request.Request(f"https://{host}/", method="HEAD")
-                with urllib.request.urlopen(req, timeout=10):  # закрыть соединение сразу после ответа
+                if host in APPLE_OWN_CA:
+                    socket.create_connection((host, 443), timeout=10).close()
                     ok = True
+                else:
+                    req = urllib.request.Request(f"https://{host}/", method="HEAD")
+                    with urllib.request.urlopen(req, timeout=10):  # закрыть соединение сразу после ответа
+                        ok = True
             except urllib.error.HTTPError:
                 ok = True  # сервер ответил (404/403 — нормально для корня)
             except (urllib.error.URLError, OSError) as e:

@@ -4,7 +4,7 @@
 
 | Компонент | Версия | Лицензия | Для чего | Исходники |
 |---|---|---|---|---|
-| ipatool | 2.7.0 | MIT | вход в Apple ID, список версий, скачивание IPA | https://github.com/majd/ipatool |
+| ipatool | 2.8.1 | MIT | вход в Apple ID, список версий, скачивание IPA | https://github.com/majd/ipatool |
 | Unicorn Engine (`libunicorn.dll`) | 2.1.4 | GPL-2.0 | нужен ipatool для подписи запросов при входе | https://github.com/unicorn-engine/unicorn |
 | pymobiledevice3 | 11.41.2 | GPL-3.0-or-later | установка IPA на iPhone по USB | https://github.com/doronz88/pymobiledevice3 |
 | pytun-pmd3 | 3.0.3 | GPL-3.0-or-later | зависимость pymobiledevice3 (сетевые туннели к iPhone) | https://github.com/doronz88/pytun-pmd3 |

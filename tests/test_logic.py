@@ -301,6 +301,29 @@ class Processes(unittest.TestCase):
             finally:
                 core.IPATOOL_HOME = old
 
+    def test_drop_keychain_items(self):
+        """macOS: из «Связки ключей» удаляются обе записи ipatool (сессия и состояние компьютера); Windows — ничего."""
+        import subprocess
+        left = {"account": 1, "anisette-v4": 2}  # две записи состояния — удаляются обе
+
+        def fake_run(cmd, **_kw):
+            account = cmd[cmd.index("-a") + 1]
+            self.assertEqual(cmd[:3], ["/usr/bin/security", "delete-generic-password", "-s"])
+            self.assertEqual(cmd[3], apple.KEYCHAIN_SERVICE)
+            if left.get(account):
+                left[account] -= 1
+                return subprocess.CompletedProcess(cmd, 0)
+            return subprocess.CompletedProcess(cmd, 44)  # «не найдено»
+
+        with mock.patch.object(apple.subprocess, "run", side_effect=fake_run) as run:
+            with mock.patch.object(apple.sys, "platform", "darwin"):
+                self.assertEqual(apple.drop_keychain_items(), 3)
+                self.assertEqual(left, {"account": 0, "anisette-v4": 0})
+            run.reset_mock()
+            with mock.patch.object(apple.sys, "platform", "win32"):
+                self.assertEqual(apple.drop_keychain_items(), 0)
+            run.assert_not_called()
+
 
 @unittest.skipUnless(sys.platform.startswith("win"), "поиск программ в текущей папке есть только на Windows")
 class ToolLookup(unittest.TestCase):
@@ -544,21 +567,34 @@ class Footprint(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("win"), "кэш ipatool в %LOCALAPPDATA% — только на Windows")
     def test_adopt_old_cache(self):
         old = Path(os.environ["LOCALAPPDATA"]) / "ipatool"
-        (old / "sap" / "apple-assets-v2").mkdir(parents=True)
-        (old / "sap" / "apple-assets-v2" / "a.bin").write_bytes(b"1")
-        (old / "unicorn").mkdir()
+        (old / "unicorn").mkdir(parents=True)
+        (old / "unicorn" / "a.bin").write_bytes(b"1")
         try:
             self.assertTrue(apple.adopt_old_cache())
-            self.assertTrue(apple.sap_ready())
-            self.assertTrue((core.IPATOOL_CACHE / "unicorn").is_dir())
+            self.assertTrue((core.IPATOOL_CACHE / "unicorn" / "a.bin").is_file())
             self.assertFalse(old.exists(), "пустая старая папка осталась")
-            (old / "sap").mkdir(parents=True)  # уже перенесено: второй раз не затирает
-            (old / "other").mkdir()
+            (old / "unicorn").mkdir(parents=True)  # уже перенесено: второй раз не затирает
+            (old / "sap").mkdir()  # служебные файлы ipatool 2.7 не переносятся
             self.assertFalse(apple.adopt_old_cache())
-            self.assertEqual(sorted(p.name for p in old.iterdir()), ["other", "sap"], "тронуто чужое")
+            self.assertEqual(sorted(p.name for p in old.iterdir()), ["sap", "unicorn"], "тронуто чужое")
         finally:
             shutil.rmtree(old, ignore_errors=True)
             shutil.rmtree(core.IPATOOL_CACHE, ignore_errors=True)
+
+    def test_old_sap_assets_dropped(self):
+        """Служебные файлы Apple от ipatool 2.7 удаляются, нынешние остаются; sap_ready смотрит на нынешние."""
+        sap = core.IPATOOL_CACHE / "sap"
+        try:
+            for name in (*apple.SAP_OLD, apple.SAP_ASSETS):
+                (sap / name).mkdir(parents=True)
+                (sap / name / "a.bin").write_bytes(b"1")
+            self.assertTrue(apple.sap_ready())
+            self.assertTrue(apple.drop_old_sap())
+            self.assertEqual([p.name for p in sap.iterdir()], [apple.SAP_ASSETS])
+            self.assertFalse(apple.drop_old_sap())
+        finally:
+            shutil.rmtree(core.IPATOOL_CACHE, ignore_errors=True)
+        self.assertFalse(apple.sap_ready())
 
     def test_pymobiledevice3_folder_inside_data_dir(self):
         import pymobiledevice3.common as pmd_common

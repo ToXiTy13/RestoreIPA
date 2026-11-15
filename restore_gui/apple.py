@@ -22,36 +22,47 @@ import restore_apps as core
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")  # цветовые коды ipatool в журнале не нужны
 NOT_OWNED = re.compile(r"license is required", re.I)  # Apple: приложения нет в истории этого Apple ID
-SESSION_LOST = re.compile(r"failed to get account|keyring|not logged|sign.?in|password token", re.I)
+SESSION_LOST = re.compile(r"failed to get account|keyring|not logged|sign.?in|password token|not provisioned", re.I)
 # копии сессии для параллельных запросов (in_session_copies); до 1.1.0 — %TEMP%\restore_scan_*
 SCAN_ROOT = core.DATA_DIR / "scan"
 UNICORN_VERSION = "2.1.4"
 UNICORN_SHA256 = "d8f9a89222ffa74493a1d47090e17f8e1db8ac171a3128c6a76a4ea09de11469"  # как в исходниках ipatool
-# официальный ipatool 2.7.0 (build.ps1, build_mac.sh): встроенный сверяется с ним перед запуском.
+# официальный ipatool (build.ps1, build_mac.sh): встроенный сверяется с ним перед запуском.
 # На macOS — хеш кода без подписи (ipatool_digest): PyInstaller переподписывает программы внутри .app
+IPATOOL_VERSION = "2.8.1"
 IPATOOL_SHA256 = {
-    "win32-amd64": "7b83589b74ad533f5d5dbab0ca87a5cb76b123bcbeb2553d57e9c154e35d8755",
-    "darwin-arm64": "f64c6ccdd10548ef1f0ad69fd539feeee03831fdb4c18ce5946ebaf7329796df",
-    "darwin-x86_64": "95108a8328021a4cefe415cb38086e81e9a56c180decc9fcb60e2bdea418c249",
+    "win32-amd64": "1c8145d4b39ff993ebce7cf832d5504ed563cc1526bb21ef5cef27d28aceb2dd",
+    "darwin-arm64": "827ed265e6070ce05382d616cc9d283122cbd96c5983d126fed8dacee98788f1",
+    "darwin-x86_64": "30b1b2fb24e61237e39b0a981d889fa124a89171fd28d52913dd7d6095be8857",
 }
+# служебные файлы Apple для входа в кэше ipatool (sap/…): текущая папка и папки прежних версий ipatool
+SAP_ASSETS = "apple-assets-macos-27-26A434-arm64-v5"
+SAP_OLD = ("apple-assets-v2", "apple-storeagent-v1")  # ipatool 2.7
 # адреса, без которых не работает вход/скачивание (для «Проверить связь с Apple»)
 APPLE_HOSTS = (
     ("buy.itunes.apple.com", "вход и лицензии"),
     ("p25-buy.itunes.apple.com", "покупки и версии"),
     ("init.itunes.apple.com", "настройки магазина"),
-    ("fpinit.itunes.apple.com", "подпись входа"),
+    ("auth.itunes.apple.com", "вход в Apple ID"),
+    ("gsa.apple.com", "подготовка входа на этом компьютере"),
+    ("www.apple.com", "сертификат Apple для входа"),
+    ("downloaddispatch.itunes.apple.com", "ссылки на скачивание"),
     ("iosapps.itunes.apple.com", "скачивание IPA"),
     ("itunes.apple.com", "поиск и наличие в App Store"),
-    ("swcdn.apple.com", "служебные файлы для первого входа"),
-    ("github.com", "резерв для эмулятора (если встроенный не подошёл)"),
+    ("updates.cdn-apple.com", "служебные файлы для первого входа"),
+    ("github.com", "резерв для эмулятора (если встроенный не подошёл)") if sys.platform.startswith("win")
+    else ("files.pythonhosted.org", "эмулятор для входа (при первом входе)"),
 )
+# сертификат этих адресов ipatool проверяет по корневому сертификату Apple, а не системному: проверяется только
+# подключение
+APPLE_OWN_CA = {"gsa.apple.com"}
 
 
 def adopt_old_cache():
     """Перенести кэш ipatool версий до 1.1.0 из %LOCALAPPDATA%\\ipatool в папку программы (core.IPATOOL_CACHE).
 
-    Там служебные файлы Apple для входа (их первая загрузка — до 15 минут) и Unicorn, вместе ~60 МБ. Переносятся
-    только эти две папки и только если в папке программы их ещё нет; пустая старая папка удаляется.
+    Переносится Unicorn и только если в папке программы его ещё нет; служебные файлы Apple оттуда — от ipatool 2.7,
+    нынешнему не нужны. Пустая старая папка удаляется.
     """
     if not sys.platform.startswith("win"):
         return False
@@ -59,7 +70,7 @@ def adopt_old_cache():
     if old == core.IPATOOL_CACHE:
         return False
     moved = False
-    for name in ("sap", "unicorn"):
+    for name in ("unicorn",):
         src, dest = old / name, core.IPATOOL_CACHE / name
         if src.is_dir() and not dest.exists():
             try:
@@ -173,18 +184,30 @@ def seed_unicorn():
 
 def sap_ready():
     """Скачаны ли уже служебные файлы Apple, нужные ipatool для входа."""
-    d = core.IPATOOL_CACHE / "sap" / "apple-assets-v2"
+    d = core.IPATOOL_CACHE / "sap" / SAP_ASSETS
     try:
         return d.is_dir() and any(d.iterdir())
     except OSError:
         return False
 
 
+def drop_old_sap():
+    """Удалить служебные файлы Apple от прежних версий ipatool (SAP_OLD) из кэша в папке программы.
+    Возвращает True, если что-то удалено."""
+    dropped = False
+    for name in SAP_OLD:
+        d = core.IPATOOL_CACHE / "sap" / name
+        if d.is_dir() and not d.is_symlink():
+            shutil.rmtree(d, ignore_errors=True)
+            dropped = dropped or not d.exists()
+    return dropped
+
+
 # ошибки, после которых следующие запросы к Apple упадут так же (пакетная установка на них прерывается)
 NET_ERROR = (r"no such host|getaddrinfo|dial tcp|i/o timeout|connection (reset|refused)|network is unreachable"
              r"|unexpected EOF|\": EOF\b")
 ACCOUNT_LOCKED = r"account (is )?(disabled|locked)|has been (disabled|locked)"
-NO_SESSION = r"password token expired|sign.?in required|failed to get account|not logged"
+NO_SESSION = r"password token expired|sign.?in required|failed to get account|not logged|not provisioned"
 
 HINTS = (
     (NET_ERROR,
@@ -246,7 +269,7 @@ def bundled(name):
 def extract_apps(obj, acc):
     """Достаёт пары (id, название) из JSON-ответа `ipatool list-purchases`.
 
-    ipatool v2.7 печатает элементы как {"id":…, "bundleID":…, "name":…, "version":…};
+    ipatool (с 2.7) печатает элементы как {"id":…, "bundleID":…, "name":…, "version":…};
     ключи сверяются без учёта регистра, на случай других версий.
     """
     if isinstance(obj, dict):
@@ -416,6 +439,30 @@ def scan_copies():
     """Папки с копиями сессии от in_session_copies, в том числе оставшиеся после сбоя (и от версий до 1.1.0)."""
     found = list(SCAN_ROOT.glob("*")) if SCAN_ROOT.is_dir() else []
     return found + list(Path(tempfile.gettempdir()).glob("restore_scan_*"))
+
+
+# записи ipatool в «Связке ключей» macOS: сессия (её удаляет и `auth revoke`) и состояние этого компьютера для входа
+# (ipatool 2.8+). На Windows то же лежит в папке сессии и удаляется вместе с ней
+KEYCHAIN_SERVICE = "ipatool-auth.service"
+KEYCHAIN_ACCOUNTS = ("account", "anisette-v4")
+
+
+def drop_keychain_items():
+    """macOS: удалить записи ipatool (KEYCHAIN_ACCOUNTS) из «Связки ключей» пользователя. Возвращает их число."""
+    if sys.platform != "darwin":
+        return 0
+    removed = 0
+    for account in KEYCHAIN_ACCOUNTS:
+        for _ in range(5):  # delete-generic-password удаляет одну запись за вызов
+            try:
+                r = subprocess.run(["/usr/bin/security", "delete-generic-password", "-s", KEYCHAIN_SERVICE,
+                                    "-a", account], capture_output=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                return removed
+            if r.returncode != 0:
+                break
+            removed += 1
+    return removed
 
 
 def list_versions_cmd(ipatool, kc, app_id):

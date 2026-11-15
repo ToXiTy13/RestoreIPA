@@ -9,9 +9,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-IPATOOL_VERSION="2.7.0"
-IPATOOL_SHA_arm64="5ae100d4520cf4b3f4374239e5925a9ad9a8dc02abc16bae27479e7ae99aca33"  # …-macos-arm64.tar.gz.sha256sum
-IPATOOL_SHA_amd64="05f48994d8b3cfefe7ea1172a0ac0b28715888e9df0af38cf3e490d2ed592263"  # …-macos-amd64.tar.gz.sha256sum
+IPATOOL_VERSION="2.8.1"
+IPATOOL_SHA_arm64="3ad673375ea6bc479df0340df03950c3f6669ab554466b05e4bb99b3369d0dd2"  # …-macos-arm64.tar.gz.sha256sum
+IPATOOL_SHA_amd64="8d1d93c1f72724cec01e72dab30ecb8eb3faf4c783f71d2310c2db3c7976efbb"  # …-macos-amd64.tar.gz.sha256sum
 
 PYTHON="${PYTHON:-python3.12}"
 ARCH="$("$PYTHON" -c 'import platform; print(platform.machine())')"

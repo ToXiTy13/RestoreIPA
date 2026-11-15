@@ -136,6 +136,7 @@ class Backend(QObject, TasksMixin, DetailMixin, PrefsMixin):
         self.owned_state = {}  # id -> True/False: есть ли приложение в истории Apple ID
         self.selected = {}  # id -> app, отмеченные для пакетной установки
         self.device = None
+        self.phone_ops, self._phone_lock = 0, threading.Lock()  # сколько операций сейчас работают с iPhone
         self.after_login = None
         self.detail = None  # состояние открытой панели приложения (см. DetailMixin.open_detail)
         self.dlock = threading.Lock()  # проверки в панели идут по одной (общая папка сессии ipatool)

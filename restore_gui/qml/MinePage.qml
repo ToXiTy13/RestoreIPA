@@ -21,7 +21,7 @@ ColumnLayout {
         listName: "mine"
         model: backend.mine
         emptyTitle: backend.loggedIn ? "Пока пусто" : "Сначала войдите в Apple ID"
-        emptySub: backend.loggedIn ? "Нажмите «Проверить по каталогу» — это займёт несколько минут."
+        emptySub: backend.loggedIn ? "Нажмите «Проверить по каталогу» — это займёт 15–30 минут."
                                    : "Потом проверим, какие приложения были у вас и пропали из App Store."
     }
 }
